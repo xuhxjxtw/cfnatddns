@@ -19,7 +19,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install pyinstaller PyQt5
+        run: pip install pyinstaller pillow pystray
 
       - name: Build executable
         run: |
