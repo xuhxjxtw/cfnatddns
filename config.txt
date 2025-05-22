@@ -1,12 +1,2 @@
-PORT_15887_ZONE_ID=zoneid_1
-PORT_15887_RECORD_ID=recordid_1
-PORT_15887_DNS_NAME=sub1.example.com
-PORT_15887_TYPE=AAAA
-
-PORT_15888_ZONE_ID=zoneid_2
-PORT_15888_RECORD_ID=recordid_2
-PORT_15888_DNS_NAME=sub2.example.com
-PORT_15888_TYPE=A
-
-API_TOKEN=your_api_token_here
-
+1234 example.com A
+1238 example.com AAAA
