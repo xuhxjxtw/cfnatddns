@@ -53,7 +53,7 @@ def get_local_ip():
         ip = s.getsockname()[0] # 获取本地连接的 IP 地址
         s.close()
         # 检查获取到的 IP 是否是回环地址或无效地址
-        if ip.startswith("127.") or ip == ip == "0.0.0.0": # Corrected: Added 'ip == "0.0.0.0"'
+        if ip.startswith("127.") or ip == "0.0.0.0":
             logging.warning(f"检测到回环或无效本地IP: {ip}")
             raise Exception("Loopback or invalid IP detected")
         logging.debug(f"成功获取本地局域网 IP: {ip}")
@@ -340,37 +340,36 @@ class App:
 
     def get_public_ip(self, conf):
         """
-        尝试从 cfnat 提供的内网 HTTP 接口获取公网 IP 地址。
-        如果内网接口未配置或获取失败，则回退到公共 IP 查询接口。
+        尝试从 cfnat 提供的内网 HTTP 接口 (127.0.0.1:listen_port) 获取公网 IP 地址。
+        如果获取失败，则回退到公共 IP 查询接口。
         """
+        port = conf.get("listen_port", 0) # 获取当前节点的监听端口
+        query_ip = "127.0.0.1" # 明确使用回环地址，因为 cfnat 在本地提供服务
+
         ip4 = None
         ip6 = None
-        cf_conf = conf["cloudflare"] # 获取 cloudflare 配置，以便读取新的 URL 字段
         
-        # 优先尝试从 cfnat_ip_query_url_ipv4 获取 IPv4
-        cfnat_ipv4_url = cf_conf.get("cfnat_ip_query_url_ipv4")
-        if cf_conf.get("enable_ipv4", True):
-            if cfnat_ipv4_url:
-                try:
-                    logging.info(f"尝试从 cfnat 内网服务获取 IPv4: {cfnat_ipv4_url}")
-                    resp = requests.get(cfnat_ipv4_url, timeout=3)
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip4_candidate = resp.text.strip()
-                        if self._is_valid_ipv4(ip4_candidate):
-                            ip4 = ip4_candidate
-                            logging.info(f"通过 cfnat 内网服务获取 IPv4 成功: {ip4}")
-                        else:
-                            logging.warning(f"cfnat 内网服务返回的 IPv4 格式不正确: '{ip4_candidate}'")
-                            raise Exception("cfnat 内网服务返回格式不正确")
+        if conf["cloudflare"].get("enable_ipv4", True):
+            # 构造 cfnat 的 IPv4 查询 URL
+            cfnat_ipv4_url = f"http://{query_ip}:{port}/ipv4" # 假设 cfnat 在 /ipv4 路径提供
+            try:
+                logging.info(f"尝试从 cfnat 内网服务获取 IPv4: {cfnat_ipv4_url}")
+                resp = requests.get(cfnat_ipv4_url, timeout=3)
+                if resp.status_code == 200 and resp.text.strip():
+                    ip4_candidate = resp.text.strip()
+                    if self._is_valid_ipv4(ip4_candidate):
+                        ip4 = ip4_candidate
+                        logging.info(f"通过 cfnat 内网服务获取 IPv4 成功: {ip4}")
                     else:
-                        logging.warning(f"cfnat 内网服务 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-                        raise Exception("cfnat 内网服务返回异常")
-                except Exception as e:
-                    logging.warning(f"从 cfnat 内网获取 IPv4 失败，尝试公网接口: {e}")
-            else:
-                logging.info("cfnat_ip_query_url_ipv4 未配置，直接尝试公网接口获取 IPv4。")
-
-            # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv4
+                        logging.warning(f"cfnat 内网服务返回的 IPv4 格式不正确: '{ip4_candidate}'")
+                        raise Exception("cfnat 内网服务返回格式不正确")
+                else:
+                    logging.warning(f"cfnat 内网服务 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                    raise Exception("cfnat 内网服务返回异常")
+            except Exception as e:
+                logging.warning(f"从 cfnat 内网获取 IPv4 失败，尝试公网接口: {e}")
+            
+            # 如果从 cfnat 获取失败，则尝试公网接口获取 IPv4
             if not ip4:
                 try:
                     ip4_candidate = requests.get("https://4.ipw.cn", timeout=5).text.strip()
@@ -382,30 +381,27 @@ class App:
                 except Exception as e:
                     logging.error(f"IPv4 公网接口获取失败: {e}")
 
-        # 优先尝试从 cfnat_ip_query_url_ipv6 获取 IPv6
-        cfnat_ipv6_url = cf_conf.get("cfnat_ip_query_url_ipv6")
-        if cf_conf.get("enable_ipv6", False):
-            if cfnat_ipv6_url:
-                try:
-                    logging.info(f"尝试从 cfnat 内网服务获取 IPv6: {cfnat_ipv6_url}")
-                    resp = requests.get(cfnat_ipv6_url, timeout=3)
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip6_candidate = resp.text.strip()
-                        if self._is_valid_ipv6(ip6_candidate):
-                            ip6 = ip6_candidate
-                            logging.info(f"通过 cfnat 内网服务获取 IPv6 成功: {ip6}")
-                        else:
-                            logging.warning(f"cfnat 内网服务返回的 IPv6 格式不正确: '{ip6_candidate}'")
-                            raise Exception("cfnat 内网服务返回格式不正确")
+        if conf["cloudflare"].get("enable_ipv6", False):
+            # 构造 cfnat 的 IPv6 查询 URL
+            cfnat_ipv6_url = f"http://{query_ip}:{port}/ipv6" # 假设 cfnat 在 /ipv6 路径提供
+            try:
+                logging.info(f"尝试从 cfnat 内网服务获取 IPv6: {cfnat_ipv6_url}")
+                resp = requests.get(cfnat_ipv6_url, timeout=3)
+                if resp.status_code == 200 and resp.text.strip():
+                    ip6_candidate = resp.text.strip()
+                    if self._is_valid_ipv6(ip6_candidate):
+                        ip6 = ip6_candidate
+                        logging.info(f"通过 cfnat 内网服务获取 IPv6 成功: {ip6}")
                     else:
-                        logging.warning(f"cfnat 内网服务 IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-                        raise Exception("cfnat 内网服务返回异常")
-                except Exception as e:
-                    logging.warning(f"从 cfnat 内网获取 IPv6 失败，尝试公网接口: {e}")
-            else:
-                logging.info("cfnat_ip_query_url_ipv6 未配置，直接尝试公网接口获取 IPv6。")
-
-            # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv6
+                        logging.warning(f"cfnat 内网服务返回的 IPv6 格式不正确: '{ip6_candidate}'")
+                        raise Exception("cfnat 内网服务返回格式不正确")
+                else:
+                    logging.warning(f"cfnat 内网服务 IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                    raise Exception("cfnat 内网服务返回异常")
+            except Exception as e:
+                logging.warning(f"从 cfnat 内网获取 IPv6 失败，尝试公网接口: {e}")
+            
+            # 如果从 cfnat 获取失败，则尝试公网接口获取 IPv6
             if not ip6:
                 try:
                     ip6_candidate = requests.get("https://6.ipw.cn", timeout=5).text.strip()
@@ -458,28 +454,24 @@ def load_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        # 抛出 FileNotFoundError，由主程序入口捕获并显示消息框
         raise FileNotFoundError(f"未找到配置文件！请确保 '{CONFIG_FILE}' 存在于 EXE 相同目录下。")
     except json.JSONDecodeError as e:
-        # 抛出 JSONDecodeError，由主程序入口捕获并显示消息框
         raise json.JSONDecodeError(f"配置文件 '{CONFIG_FILE}' 格式不正确，请检查 JSON 语法。", e.doc, e.pos)
     except Exception as e:
-        # 抛出其他未知异常
         raise Exception(f"加载配置文件时发生未知错误: {e}")
 
 if __name__ == "__main__":
-    # 提前创建 Tkinter 根窗口，以便在配置文件加载失败时显示错误消息框
     root = tk.Tk()
-    root.withdraw() # 启动时先隐藏窗口，直到 App 初始化完成或显示错误
+    root.withdraw()
 
     app_config = None
     try:
-        app_config = load_config() # 尝试加载配置文件
+        app_config = load_config()
         logging.info("配置文件加载成功！")
     except FileNotFoundError as e:
         logging.critical(f"严重错误：{e} 程序将退出。")
-        messagebox.showerror("错误", str(e)) # 显示错误消息框
-        sys.exit(1) # 立即退出程序
+        messagebox.showerror("错误", str(e))
+        sys.exit(1)
     except json.JSONDecodeError as e:
         logging.critical(f"严重错误：{e} 程序将退出。", exc_info=True)
         messagebox.showerror("错误", str(e))
@@ -489,12 +481,10 @@ if __name__ == "__main__":
         messagebox.showerror("错误", str(e))
         sys.exit(1)
 
-    # 如果配置文件加载成功，则继续启动 GUI 和主程序逻辑
     try:
         app = App(root, app_config)
-        # 当用户点击窗口关闭按钮时，隐藏窗口到托盘而不是关闭程序
-        root.protocol("WM_DELETE_WINDOW", lambda: root.withdraw()) 
-        root.mainloop() # 启动 Tkinter 事件循环
+        root.protocol("WM_DELETE_WINDOW", lambda: root.withdraw())
+        root.mainloop()
     except Exception as e:
         logging.critical(f"程序 GUI 或 主循环启动时发生严重错误: {e}", exc_info=True)
         messagebox.showerror("严重错误", f"程序启动时发生严重错误！请查看日志文件 '{LOG_FILE}'。\n错误信息：{e}")
