@@ -24,8 +24,8 @@ jobs:
 
       - name: Build executable
         run: |
-          # 关键修改在这里：添加 --hidden-import=PIL.Image
-          pyinstaller main.py --onefile --noconsole --icon=icon.ico --hidden-import=tkinter.scrolledtext --hidden-import=PIL.Image
+          # 关键修改在这里：将 --hidden-import=PIL.Image 改为 --hidden-import=PIL
+          pyinstaller main.py --onefile --noconsole --icon=icon.ico --hidden-import=tkinter.scrolledtext --hidden-import=PIL # 强制包含整个 PIL 包
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
           copy config.json dist_bundle\\
