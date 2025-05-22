@@ -24,10 +24,13 @@ jobs:
 
       - name: Build executable
         run: |
+          # 确保使用 PowerShell 的行继续符 `
+          # 添加 --additional-hooks-dir=hooks 来指定自定义 hook 文件
           pyinstaller main.py --onefile --noconsole --icon=icon.ico `
             --hidden-import=tkinter.scrolledtext `
-            --hidden-import=PIL `
-            --collect-all pystray # 关键：让 PyInstaller 收集 pystray 的所有依赖
+            --hidden-import=PIL ` # 仍然保留，作为额外保障
+            --collect-all pystray ` # 仍然保留，作为额外保障
+            --additional-hooks-dir=hooks # 关键：告诉 PyInstaller 查找自定义 hook 文件
 
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
