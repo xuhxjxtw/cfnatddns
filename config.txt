@@ -10,4 +10,3 @@ PORT_15888_TYPE=A
 
 API_TOKEN=your_api_token_here
 
-# trigger build
