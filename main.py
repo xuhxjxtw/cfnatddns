@@ -1,96 +1,155 @@
+import tkinter as tk
+from tkinter.scrolledtext import ScrolledText
+import threading
 import json
+import socket
 import requests
 import time
-import socket
-import threading
-from pathlib import Path
+import os
+from pystray import Icon, Menu, MenuItem
+from PIL import Image
 
-CONFIG_PATH = Path("config.json")
-GET_IPV4_URL = "https://4.ipw.cn"
-GET_IPV6_URL = "https://6.ipw.cn"
-UPDATE_INTERVAL = 300  # 每5分钟
+CONFIG_FILE = 'config.json'
+
 
 def get_local_ip():
-    """尝试获取内网IP"""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-    finally:
         s.close()
-    return ip
-
-def get_public_ip(ipv6=False):
-    try:
-        url = GET_IPV6_URL if ipv6 else GET_IPV4_URL
-        resp = requests.get(url, timeout=5)
-        return resp.text.strip()
-    except Exception as e:
-        print(f"获取 {'IPv6' if ipv6 else 'IPv4'} 失败: {e}")
+        if ip.startswith("127.") or ip == "0.0.0.0":
+            raise Exception("Loopback or invalid IP")
+        return ip
+    except:
         return None
 
-def update_dns_record(email, api_key, zone_id, record_name, ip, record_type):
-    headers = {
-        "X-Auth-Email": email,
-        "X-Auth-Key": api_key,
-        "Content-Type": "application/json",
-    }
-    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-    # 获取记录ID
-    records = requests.get(url, headers=headers).json()
-    record_id = None
-    for r in records.get("result", []):
-        if r["name"] == record_name and r["type"] == record_type:
-            record_id = r["id"]
-            break
-    if not record_id:
-        print(f"找不到记录: {record_name} ({record_type})")
-        return
-    data = {
-        "type": record_type,
-        "name": record_name,
-        "content": ip,
-        "ttl": 120,
-        "proxied": False
-    }
-    r = requests.put(f"{url}/{record_id}", headers=headers, json=data)
-    print(f"更新 {record_type} {record_name} 为 {ip}: {r.status_code}")
 
-def worker(node_name, config):
-    port = config["listen_port"]
-    cf = config["cloudflare"]
-    ipv4_enabled = cf.get("enable_ipv4", True)
-    ipv6_enabled = cf.get("enable_ipv6", False)
-    while True:
-        local_ip = get_local_ip()
-        print(f"[{node_name}] 本地IP: {local_ip}:{port}")
+class App:
+    def __init__(self, root, config):
+        self.root = root
+        self.config = config
+        self.root.title("CF DDNS Listener")
+        self.root.geometry("500x300")
+        self.text = ScrolledText(self.root, state='disabled')
+        self.text.pack(expand=True, fill='both')
+        self.icon = None
+        self.start_all()
+        self.setup_tray()
 
-        if ipv4_enabled:
-            ip4 = get_public_ip(False)
-            if ip4:
-                update_dns_record(cf["email"], cf["api_key"], cf["zone_id"], cf["record_name"], ip4, "A")
+    def log(self, message):
+        self.text.configure(state='normal')
+        self.text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
+        self.text.configure(state='disabled')
+        self.text.see(tk.END)
 
-        if ipv6_enabled:
-            ip6 = get_public_ip(True)
-            if ip6:
-                update_dns_record(cf["email"], cf["api_key"], cf["zone_id"], cf["record_name"], ip6, "AAAA")
+    def start_all(self):
+        nodes = self.config.get("nodes", {})
+        for name, conf in nodes.items():
+            port = conf.get("listen_port")
+            threading.Thread(target=self.listen, args=(name, port, conf), daemon=True).start()
 
-        time.sleep(UPDATE_INTERVAL)
+    def listen(self, name, port, conf):
+        host_ip = get_local_ip()
+        if not host_ip:
+            self.log(f"[{name}] 未能获取有效局域网 IP，监听失败")
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((host_ip, port))
+        except Exception as e:
+            self.log(f"[{name}] 绑定失败 {host_ip}:{port} 错误: {e}")
+            return
+        s.listen(5)
+        self.log(f"[{name}] 正在监听: {host_ip}:{port}")
+        while True:
+            conn, addr = s.accept()
+            conn.close()
+            self.log(f"[{name}] 收到请求: {addr}")
+            threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
 
-def main():
-    if not CONFIG_PATH.exists():
-        print("缺少 config.json 文件")
-        return
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    def update_cf(self, name, conf):
+        ip = self.get_public_ip(conf)
+        if not ip:
+            self.log(f"[{name}] 获取公网 IP 失败")
+            return
 
-    nodes = config.get("nodes", {})
-    for name, cfg in nodes.items():
-        threading.Thread(target=worker, args=(name, cfg), daemon=True).start()
+        headers = {
+            "X-Auth-Email": conf["cloudflare"]["email"],
+            "X-Auth-Key": conf["cloudflare"]["api_key"],
+            "Content-Type": "application/json"
+        }
 
-    # 保持主线程运行
-    while True:
-        time.sleep(60)
+        data = {
+            "type": "A",
+            "name": conf["cloudflare"]["record_name"],
+            "content": ip,
+            "ttl": 120,
+            "proxied": False
+        }
+
+        zone_id = conf["cloudflare"]["zone_id"]
+        record_name = conf["cloudflare"]["record_name"]
+
+        try:
+            res = requests.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", headers=headers)
+            recs = res.json().get("result", [])
+            record_id = next((r["id"] for r in recs if r["name"] == record_name), None)
+            if not record_id:
+                self.log(f"[{name}] 找不到 DNS 记录: {record_name}")
+                return
+
+            res = requests.put(
+                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+                headers=headers,
+                json=data
+            )
+
+            if res.json().get("success"):
+                self.log(f"[{name}] 更新成功: {ip}")
+            else:
+                self.log(f"[{name}] 更新失败: {res.text}")
+
+        except Exception as e:
+            self.log(f"[{name}] 异常: {e}")
+
+    def get_public_ip(self, conf):
+        if conf["cloudflare"].get("enable_ipv4", True):
+            try:
+                return requests.get("https://4.ipw.cn").text
+            except:
+                return None
+        if conf["cloudflare"].get("enable_ipv6", False):
+            try:
+                return requests.get("https://6.ipw.cn").text
+            except:
+                return None
+        return None
+
+    def setup_tray(self):
+        if os.path.exists("icon.ico"):
+            image = Image.open("icon.ico")
+        else:
+            image = Image.new("RGB", (64, 64), "blue")
+        menu = Menu(MenuItem("显示", self.show_window), MenuItem("退出", self.quit_app))
+        self.icon = Icon("CFTray", image, "CF DDNS", menu)
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def show_window(self, icon, item):
+        self.root.after(0, lambda: self.root.deiconify())
+
+    def quit_app(self, icon, item):
+        icon.stop()
+        self.root.after(0, self.root.destroy)
+
+
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    config = load_config()
+    app = App(root, config)
+    root.mainloop()
