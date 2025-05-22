@@ -11,7 +11,6 @@ from PIL import Image
 
 CONFIG_FILE = 'config.json'
 
-
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -23,7 +22,6 @@ def get_local_ip():
         return ip
     except:
         return None
-
 
 class App:
     def __init__(self, root, config):
@@ -65,13 +63,13 @@ class App:
         while True:
             conn, addr = s.accept()
             conn.close()
-            self.log(f"[{name}] 收到请求: {addr}")
-            threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
+            client_ip = addr[0]
+            self.log(f"[{name}] 收到来自 {client_ip} 的连接")
+            threading.Thread(target=self.update_cf, args=(name, conf, client_ip), daemon=True).start()
 
-    def update_cf(self, name, conf):
-        ip = self.get_public_ip(conf)
+    def update_cf(self, name, conf, ip):
         if not ip:
-            self.log(f"[{name}] 获取公网 IP 失败")
+            self.log(f"[{name}] IP 不存在，无法更新")
             return
 
         headers = {
@@ -113,19 +111,6 @@ class App:
         except Exception as e:
             self.log(f"[{name}] 异常: {e}")
 
-    def get_public_ip(self, conf):
-        if conf["cloudflare"].get("enable_ipv4", True):
-            try:
-                return requests.get("https://4.ipw.cn").text
-            except:
-                return None
-        if conf["cloudflare"].get("enable_ipv6", False):
-            try:
-                return requests.get("https://6.ipw.cn").text
-            except:
-                return None
-        return None
-
     def setup_tray(self):
         if os.path.exists("icon.ico"):
             image = Image.open("icon.ico")
@@ -142,11 +127,9 @@ class App:
         icon.stop()
         self.root.after(0, self.root.destroy)
 
-
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 if __name__ == "__main__":
     root = tk.Tk()
