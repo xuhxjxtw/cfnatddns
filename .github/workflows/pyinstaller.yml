@@ -20,8 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller requests pystray pillow
 
       - name: Build executable
         run: |
@@ -29,6 +28,7 @@ jobs:
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
           copy config.json dist_bundle\\
+          copy port_config.json dist_bundle\\
           copy icon.ico dist_bundle\\
 
       - name: Zip output
