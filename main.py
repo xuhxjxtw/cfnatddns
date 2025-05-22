@@ -63,13 +63,13 @@ class App:
         while True:
             conn, addr = s.accept()
             conn.close()
-            client_ip = addr[0]
-            self.log(f"[{name}] 收到来自 {client_ip} 的连接")
-            threading.Thread(target=self.update_cf, args=(name, conf, client_ip), daemon=True).start()
+            self.log(f"[{name}] 收到请求: {addr}")
+            threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
 
-    def update_cf(self, name, conf, ip):
+    def update_cf(self, name, conf):
+        ip = self.get_public_ip(conf)
         if not ip:
-            self.log(f"[{name}] IP 不存在，无法更新")
+            self.log(f"[{name}] 获取公网 IP 失败")
             return
 
         headers = {
@@ -110,6 +110,55 @@ class App:
 
         except Exception as e:
             self.log(f"[{name}] 异常: {e}")
+
+    def get_public_ip(self, conf):
+        port = conf.get("listen_port", 0)
+        ip4 = None
+        ip6 = None
+
+        if conf["cloudflare"].get("enable_ipv4", True):
+            try:
+                local_ip = get_local_ip()
+                if local_ip:
+                    url = f"http://{local_ip}:{port}/ipv4"
+                    resp = requests.get(url, timeout=3)
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip4 = resp.text.strip()
+                    else:
+                        raise Exception("内网服务返回异常")
+                else:
+                    raise Exception("无有效内网IP")
+            except Exception as e:
+                self.log(f"IPv4 内网获取失败，尝试公网接口: {e}")
+                try:
+                    ip4 = requests.get("https://4.ipw.cn", timeout=5).text.strip()
+                except Exception as e2:
+                    self.log(f"IPv4 公网接口获取失败: {e2}")
+
+        if conf["cloudflare"].get("enable_ipv6", False):
+            try:
+                local_ip = get_local_ip()
+                if local_ip:
+                    url = f"http://{local_ip}:{port}/ipv6"
+                    resp = requests.get(url, timeout=3)
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip6 = resp.text.strip()
+                    else:
+                        raise Exception("内网服务返回异常")
+                else:
+                    raise Exception("无有效内网IP")
+            except Exception as e:
+                self.log(f"IPv6 内网获取失败，尝试公网接口: {e}")
+                try:
+                    ip6 = requests.get("https://6.ipw.cn", timeout=5).text.strip()
+                except Exception as e2:
+                    self.log(f"IPv6 公网接口获取失败: {e2}")
+
+        if ip4:
+            return ip4
+        if ip6:
+            return ip6
+        return None
 
     def setup_tray(self):
         if os.path.exists("icon.ico"):
