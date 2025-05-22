@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v3
 
@@ -20,11 +21,20 @@ jobs:
       - name: Install dependencies
         run: pip install pyinstaller
 
-      - name: Build EXE
-        run: pyinstaller --onefile main.py
+      - name: Build executable
+        run: |
+          pyinstaller --onefile --noconsole --icon=icon.ico main.py
+          mkdir dist_bundle
+          copy dist\\main.exe dist_bundle\\cf_updater.exe
+          copy config.json dist_bundle\\
+          copy port_config.json dist_bundle\\
+          copy icon.ico dist_bundle\\
 
-      - name: Upload EXE
+      - name: Zip output
+        run: powershell Compress-Archive -Path dist_bundle\\* -DestinationPath cf_updater.zip
+
+      - name: Upload EXE ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: cf_updater_exe
-          path: dist/main.exe
+          name: cf_updater_bundle
+          path: cf_updater.zip
