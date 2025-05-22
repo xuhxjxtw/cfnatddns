@@ -20,15 +20,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller requests pystray pillow
+          pip install pyinstaller pystray pillow requests
 
       - name: Build executable
         run: |
-          pyinstaller --onefile --noconsole --icon=icon.ico main.py
+          pyinstaller main.py --onefile --noconsole --icon=icon.ico --hidden-import=tkinter.scrolledtext
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
           copy config.json dist_bundle\\
-          copy port_config.json dist_bundle\\
           copy icon.ico dist_bundle\\
 
       - name: Zip output
