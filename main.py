@@ -340,7 +340,7 @@ class App:
 
     def get_public_ip(self, conf):
         """
-        尝试从 cfnat 提供的内网 HTTP 接口 (127.0.0.1:listen_port) 获取公网 IP 地址。
+        尝试从 cfnat 提供的内网 HTTP/HTTPS 接口 (127.0.0.1:listen_port) 获取公网 IP 地址。
         如果获取失败，则回退到公共 IP 查询接口。
         """
         port = conf.get("listen_port", 0) # 获取当前节点的监听端口
@@ -350,11 +350,13 @@ class App:
         ip6 = None
         
         if conf["cloudflare"].get("enable_ipv4", True):
-            # 构造 cfnat 的 IPv4 查询 URL
-            cfnat_ipv4_url = f"http://{query_ip}:{port}/ipv4" # 假设 cfnat 在 /ipv4 路径提供
+            # 构造 cfnat 的 IPv4 查询 URL，尝试 HTTPS 协议
+            cfnat_ipv4_url = f"https://{query_ip}:{port}/ipv4" # 假设 cfnat 在 /ipv4 路径提供
             try:
-                logging.info(f"尝试从 cfnat 内网服务获取 IPv4: {cfnat_ipv4_url}")
-                resp = requests.get(cfnat_ipv4_url, timeout=3)
+                logging.info(f"尝试从 cfnat 内网服务获取 IPv4 (HTTPS): {cfnat_ipv4_url}")
+                # 禁用 SSL 证书验证，因为是内网服务，可能没有有效证书
+                requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning) # 禁用警告
+                resp = requests.get(cfnat_ipv4_url, timeout=3, verify=False) 
                 if resp.status_code == 200 and resp.text.strip():
                     ip4_candidate = resp.text.strip()
                     if self._is_valid_ipv4(ip4_candidate):
@@ -382,11 +384,13 @@ class App:
                     logging.error(f"IPv4 公网接口获取失败: {e}")
 
         if conf["cloudflare"].get("enable_ipv6", False):
-            # 构造 cfnat 的 IPv6 查询 URL
-            cfnat_ipv6_url = f"http://{query_ip}:{port}/ipv6" # 假设 cfnat 在 /ipv6 路径提供
+            # 构造 cfnat 的 IPv6 查询 URL，尝试 HTTPS 协议
+            cfnat_ipv6_url = f"https://{query_ip}:{port}/ipv6" # 假设 cfnat 在 /ipv6 路径提供
             try:
-                logging.info(f"尝试从 cfnat 内网服务获取 IPv6: {cfnat_ipv6_url}")
-                resp = requests.get(cfnat_ipv6_url, timeout=3)
+                logging.info(f"尝试从 cfnat 内网服务获取 IPv6 (HTTPS): {cfnat_ipv6_url}")
+                # 禁用 SSL 证书验证，因为是内网服务，可能没有有效证书
+                requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning) # 禁用警告
+                resp = requests.get(cfnat_ipv6_url, timeout=3, verify=False) 
                 if resp.status_code == 200 and resp.text.strip():
                     ip6_candidate = resp.text.strip()
                     if self._is_valid_ipv6(ip6_candidate):
