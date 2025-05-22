@@ -1,88 +1,93 @@
-
-import socketserver
+import socket
 import threading
 import requests
-import json
-import os
-import re
+import time
+import logging
 
-CONFIG_PATH = "config.txt"
+# 日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
+# 从配置文件读取端口与域名映射
+CONFIG_FILE = 'config.txt'
+
+# 你的 Cloudflare API Token、Zone ID
+CF_API_TOKEN = 'your_token_here'
+CF_ZONE_ID = 'your_zone_id_here'
+CF_API_BASE = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
+
+# 存储端口对应配置
+domain_map = {}
+
+# 读取配置文件
 def load_config():
-    config = {}
-    if not os.path.exists(CONFIG_PATH):
-        print("配置文件不存在")
-        return config
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(CONFIG_FILE, 'r') as f:
         for line in f:
-            if "=" in line:
-                k, v = line.strip().split("=", 1)
-                config[k.strip()] = v.strip()
-    return config
+            parts = line.strip().split()
+            if len(parts) != 3:
+                continue
+            port, domain, rtype = parts
+            domain_map[int(port)] = {'domain': domain, 'type': rtype.upper()}
 
-def extract_ip(data, record_type):
-    try:
-        json_obj = json.loads(data)
-        ip = json_obj.get("best") or json_obj.get("ip")
-        if ip:
-            return ip
-    except:
-        pass
-    if record_type == "A":
-        match = re.search(r"(\d{1,3}\.){3}\d{1,3}", data)
-    else:
-        match = re.search(r"([0-9a-fA-F:]{2,})", data)
-    return match.group(0) if match else None
-
-def update_cloudflare(zone_id, record_id, dns_name, ip, record_type, token):
-    url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+# 更新 Cloudflare DNS 记录
+def update_cf(domain, ip, rtype):
     headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        'Authorization': f'Bearer {CF_API_TOKEN}',
+        'Content-Type': 'application/json'
     }
-    body = {
-        "type": record_type,
-        "name": dns_name,
-        "content": ip,
-        "ttl": 120,
-        "proxied": False
+    params = {
+        'name': domain,
+        'match': 'all'
     }
-    response = requests.put(url, headers=headers, json=body)
-    print(f"[{dns_name}] [{record_type}] => {ip} 上传结果: {response.status_code}, {response.text}")
+    try:
+        r = requests.get(CF_API_BASE, headers=headers, params=params)
+        records = r.json()
+        for rec in records['result']:
+            if rec['type'] == rtype:
+                record_id = rec['id']
+                data = {
+                    'type': rtype,
+                    'name': domain,
+                    'content': ip,
+                    'ttl': 1,
+                    'proxied': False
+                }
+                res = requests.put(f"{CF_API_BASE}/{record_id}", headers=headers, json=data)
+                if res.status_code == 200:
+                    logging.info(f"[{domain}] DNS 更新成功: {ip}")
+                else:
+                    logging.warning(f"[{domain}] 更新失败: {res.text}")
+                return
+        logging.warning(f"[{domain}] 找不到匹配的记录")
+    except Exception as e:
+        logging.error(f"[{domain}] Cloudflare 请求失败: {e}")
 
-class CFHandler(socketserver.BaseRequestHandler):
-    def handle(self):
-        port = self.server.server_address[1]
-        data = self.request.recv(2048).decode("utf-8").strip()
-        print(f"[{port}] 收到数据: {data}")
-        config = load_config()
-        prefix = f"PORT_{port}_"
-        try:
-            zone_id = config[prefix + "ZONE_ID"]
-            record_id = config[prefix + "RECORD_ID"]
-            dns_name = config[prefix + "DNS_NAME"]
-            record_type = config.get(prefix + "TYPE", "AAAA")
-            token = config["API_TOKEN"]
-            ip = extract_ip(data, record_type)
-            if ip:
-                update_cloudflare(zone_id, record_id, dns_name, ip, record_type, token)
-            else:
-                print(f"[{port}] 无有效 IP")
-        except KeyError as e:
-            print(f"[{port}] 缺少配置项: {e}")
+# 监听端口线程
+def listen_on_port(port, domain, rtype):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(('127.0.0.1', port))
+    sock.listen(5)
+    logging.info(f"监听中: 127.0.0.1:{port} → {domain} ({rtype})")
 
-def start_listener(ports):
-    for port in ports:
-        server = socketserver.ThreadingTCPServer(("127.0.0.1", port), CFHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        print(f"监听 127.0.0.1:{port}")
+    while True:
+        conn, addr = sock.accept()
+        data = conn.recv(1024).decode().strip()
+        conn.close()
+        if data:
+            logging.info(f"收到来自端口 {port} 的 IP: {data}")
+            update_cf(domain, data, rtype)
 
-if __name__ == "__main__":
-    config = load_config()
-    ports = [int(k.split("_")[1]) for k in config if k.startswith("PORT_") and k.endswith("_ZONE_ID")]
-    if not ports:
-        print("未在 config.txt 中找到端口配置")
-    else:
-        print("开始监听...")
-        start_listener(ports)
-        input("按 Enter 键退出...")
+# 主入口
+if __name__ == '__main__':
+    load_config()
+    for port, info in domain_map.items():
+        t = threading.Thread(target=listen_on_port, args=(port, info['domain'], info['type']))
+        t.daemon = True
+        t.start()
+
+    logging.info("所有端口监听线程已启动，程序常驻运行中...")
+    while True:
+        time.sleep(3600)
