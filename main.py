@@ -53,7 +53,7 @@ def get_local_ip():
         ip = s.getsockname()[0] # 获取本地连接的 IP 地址
         s.close()
         # 检查获取到的 IP 是否是回环地址或无效地址
-        if ip.startswith("127.") or ip == "0.0.0.0":
+        if ip.startswith("127.") or ip == ip == "0.0.0.0": # Corrected: Added 'ip == "0.0.0.0"'
             logging.warning(f"检测到回环或无效本地IP: {ip}")
             raise Exception("Loopback or invalid IP detected")
         logging.debug(f"成功获取本地局域网 IP: {ip}")
@@ -347,8 +347,8 @@ class App:
         ip6 = None
         cf_conf = conf["cloudflare"] # 获取 cloudflare 配置，以便读取新的 URL 字段
         
-        # 优先尝试从 cfnat_ip_source_url_ipv4 获取 IPv4
-        cfnat_ipv4_url = cf_conf.get("cfnat_ip_source_url_ipv4")
+        # 优先尝试从 cfnat_ip_query_url_ipv4 获取 IPv4
+        cfnat_ipv4_url = cf_conf.get("cfnat_ip_query_url_ipv4")
         if cf_conf.get("enable_ipv4", True):
             if cfnat_ipv4_url:
                 try:
@@ -368,7 +368,7 @@ class App:
                 except Exception as e:
                     logging.warning(f"从 cfnat 内网获取 IPv4 失败，尝试公网接口: {e}")
             else:
-                logging.info("cfnat_ip_source_url_ipv4 未配置，直接尝试公网接口获取 IPv4。")
+                logging.info("cfnat_ip_query_url_ipv4 未配置，直接尝试公网接口获取 IPv4。")
 
             # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv4
             if not ip4:
@@ -382,8 +382,8 @@ class App:
                 except Exception as e:
                     logging.error(f"IPv4 公网接口获取失败: {e}")
 
-        # 优先尝试从 cfnat_ip_source_url_ipv6 获取 IPv6
-        cfnat_ipv6_url = cf_conf.get("cfnat_ip_source_url_ipv6")
+        # 优先尝试从 cfnat_ip_query_url_ipv6 获取 IPv6
+        cfnat_ipv6_url = cf_conf.get("cfnat_ip_query_url_ipv6")
         if cf_conf.get("enable_ipv6", False):
             if cfnat_ipv6_url:
                 try:
@@ -403,7 +403,7 @@ class App:
                 except Exception as e:
                     logging.warning(f"从 cfnat 内网获取 IPv6 失败，尝试公网接口: {e}")
             else:
-                logging.info("cfnat_ip_source_url_ipv6 未配置，直接尝试公网接口获取 IPv6。")
+                logging.info("cfnat_ip_query_url_ipv6 未配置，直接尝试公网接口获取 IPv6。")
 
             # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv6
             if not ip6:
