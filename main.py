@@ -106,7 +106,7 @@ class App:
         self.log_to_gui(f"配置文件路径: {CONFIG_FILE}")
         self.log_to_gui(f"日志文件路径: {LOG_FILE}")
         
-        self.start_all() # 启动所有节点的监听和更新线程
+        self.start_all()
         # 托盘图标功能已禁用，所以不调用 setup_tray()
         # if HAS_TRAY_ICON:
         #     self.setup_tray()
@@ -155,8 +155,7 @@ class App:
             # 启动监听线程，daemon=True 确保主程序退出时线程也会退出
             threading.Thread(target=self.listen, args=(name, port, conf), daemon=True).start()
             
-            # 关键：立即启动一个更新线程，而不是等待监听触发
-            # 这样程序启动后就会立即进行一次 DNS 更新
+            # 关键：立即启动一个更新线程，确保程序启动后就会立即进行一次 DNS 更新
             logging.info(f"[{name}] 立即启动首次 DNS 更新。")
             threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
 
@@ -164,7 +163,7 @@ class App:
     def listen(self, name, port, conf):
         """
         监听指定端口的连接，并在收到请求时触发 DNS 更新。
-        同时包含周期性更新逻辑，确保即使没有外部请求也能定期更新 DNS。
+        同时包含周期性更新逻辑。
         """
         host_ip = get_local_ip()
         if not host_ip:
@@ -220,24 +219,20 @@ class App:
 
 
     def update_cf(self, name, conf):
-        """
-        获取公网 IP 并更新 Cloudflare DNS 记录。
-        """
-        # 增加一些错误检查，确保 cloudflare 配置部分存在
+        """获取公网IP并更新Cloudflare DNS记录。"""
         if "cloudflare" not in conf:
             logging.error(f"[{name}] 配置中缺少 'cloudflare' 部分。")
             self.log_to_gui(f"[{name}] 配置中缺少 'cloudflare' 部分。")
             return
         cf_conf = conf["cloudflare"]
-        # 检查 Cloudflare 配置中必需的字段是否存在
         required_cf_keys = ["email", "api_key", "zone_id", "record_name"]
         if not all(key in cf_conf for key in required_cf_keys):
             logging.error(f"[{name}] Cloudflare 配置不完整，缺少必需字段。")
             self.log_to_gui(f"[{name}] Cloudflare 配置不完整。")
             return
 
-        # 获取公网 IP
-        ip = self.get_public_ip(conf)
+        # 获取公网 IP (直接从公共服务获取，不再尝试内网服务)
+        ip = self.get_public_ip_from_public_service(conf)
         if not ip:
             logging.error(f"[{name}] 获取公网 IP 失败，无法更新 DNS。")
             self.log_to_gui(f"[{name}] 获取公网 IP 失败")
@@ -245,7 +240,6 @@ class App:
         
         logging.info(f"[{name}] 获取到公网 IP: {ip}")
 
-        # Cloudflare API 请求头
         headers = {
             "X-Auth-Email": cf_conf["email"],
             "X-Auth-Key": cf_conf["api_key"], # 使用 API Key
@@ -344,85 +338,37 @@ class App:
             logging.error(f"[{name}] 更新 Cloudflare DNS 记录时发生未预期异常: {e}", exc_info=True)
             self.log_to_gui(f"[{name}] 更新异常: {e}")
 
-    def get_public_ip(self, conf):
+    def get_public_ip_from_public_service(self, conf):
         """
-        尝试从内网服务或公网接口获取公网 IP 地址。
-        优先尝试从内网服务获取，如果失败则回退到公共 IP 查询接口。
+        只从公共 IP 查询接口获取公网 IP 地址。
         """
-        port = conf.get("listen_port", 0) # 获取监听端口，默认为0以防万一
         ip4 = None
         ip6 = None
         
-        # 如果配置中启用了 IPv4
         if conf["cloudflare"].get("enable_ipv4", True):
             try:
-                local_ip = get_local_ip() # 获取本地局域网 IP
-                if local_ip:
-                    # 假设 cfnat 或其他内网服务在 {local_ip}:{port}/ipv4 路径提供公网 IP
-                    url = f"http://{local_ip}:{port}/ipv4" 
-                    logging.info(f"尝试从内网服务获取 IPv4: {url}")
-                    resp = requests.get(url, timeout=3) # 设置请求超时
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip4_candidate = resp.text.strip()
-                        if self._is_valid_ipv4(ip4_candidate): # 验证 IP 地址格式
-                            ip4 = ip4_candidate
-                            logging.info(f"通过内网服务获取 IPv4 成功: {ip4}")
-                        else:
-                            logging.warning(f"内网服务返回的 IPv4 格式不正确: '{ip4_candidate}'")
-                            raise Exception("内网服务返回格式不正确")
-                    else:
-                        logging.warning(f"内网服务 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-                        raise Exception("内网服务返回异常")
+                # 备用公网 IP 获取接口 (IPv4)
+                ip4_candidate = requests.get("https://4.ipw.cn", timeout=5).text.strip()
+                if self._is_valid_ipv4(ip4_candidate):
+                    ip4 = ip4_candidate
+                    logging.info(f"通过公网接口获取 IPv4 成功: {ip4}")
                 else:
-                    raise Exception("无有效内网IP，无法尝试内网服务")
+                    logging.warning(f"公网接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
             except Exception as e:
-                logging.warning(f"IPv4 内网获取失败，尝试公网接口: {e}")
-                try:
-                    # 备用公网 IP 获取接口 (IPv4)
-                    ip4_candidate = requests.get("https://4.ipw.cn", timeout=5).text.strip()
-                    if self._is_valid_ipv4(ip4_candidate):
-                        ip4 = ip4_candidate
-                        logging.info(f"通过公网接口获取 IPv4 成功: {ip4}")
-                    else:
-                        logging.warning(f"公网接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
-                except Exception as e2:
-                    logging.error(f"IPv4 公网接口获取失败: {e2}")
+                logging.error(f"IPv4 公网接口获取失败: {e}")
 
-        # 如果配置中启用了 IPv6
         if conf["cloudflare"].get("enable_ipv6", False):
             try:
-                local_ip = get_local_ip()
-                if local_ip:
-                    url = f"http://{local_ip}:{port}/ipv6"
-                    logging.info(f"尝试从内网服务获取 IPv6: {url}")
-                    resp = requests.get(url, timeout=3)
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip6_candidate = resp.text.strip()
-                        if self._is_valid_ipv6(ip6_candidate):
-                            ip6 = ip6_candidate
-                            logging.info(f"通过内网服务获取 IPv6 成功: {ip6}")
-                        else:
-                            logging.warning(f"内网服务返回的 IPv6 格式不正确: '{ip6_candidate}'")
-                            raise Exception("内网服务返回格式不正确")
-                    else:
-                        logging.warning(f"内网服务 IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-                        raise Exception("内网服务返回异常")
+                # 备用公网 IP 获取接口 (IPv6)
+                ip6_candidate = requests.get("https://6.ipw.cn", timeout=5).text.strip()
+                if self._is_valid_ipv6(ip6_candidate):
+                    ip6 = ip6_candidate
+                    logging.info(f"通过公网接口获取 IPv6 成功: {ip6}")
                 else:
-                    raise Exception("无有效内网IP，无法尝试内网服务")
+                    logging.warning(f"公网接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
             except Exception as e:
-                logging.warning(f"IPv6 内网获取失败，尝试公网接口: {e}")
-                try:
-                    # 备用公网 IP 获取接口 (IPv6)
-                    ip6_candidate = requests.get("https://6.ipw.cn", timeout=5).text.strip()
-                    if self._is_valid_ipv6(ip6_candidate):
-                        ip6 = ip6_candidate
-                        logging.info(f"通过公网接口获取 IPv6 成功: {ip6}")
-                    else:
-                        logging.warning(f"公网接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
-                except Exception as e2:
-                    logging.error(f"IPv6 公网接口获取失败: {e2}")
+                logging.error(f"IPv6 公网接口获取失败: {e}")
 
-        # 根据优先级返回获取到的 IP
         if ip4:
             return ip4
         if ip6:
@@ -431,7 +377,6 @@ class App:
             # 如果 ip4 不存在但 ip6 存在，则返回 ip6。
             # Cloudflare DDNS通常会针对 A 记录 (IPv4) 和 AAAA 记录 (IPv6) 分别更新。
             # 这里的 get_public_ip 只返回一个 IP，意味着您可能需要为 IPv4 和 IPv6 分别调用 update_cf。
-            # 或者修改 update_cf 来同时处理两种记录。
             return ip6 
         
         logging.error("未能获取任何有效的公网 IP 地址。")
@@ -453,19 +398,15 @@ class App:
         except socket.error:
             return False
 
-    # 移除 setup_tray 函数，因为托盘图标功能已禁用
-    # def setup_tray(self):
-    #     pass 
-
-    def show_window(self, icon=None, item=None): # 保持参数兼容性，以防万一
+    def show_window(self, icon=None, item=None):
         """显示主窗口。"""
         self.root.after(0, lambda: self.root.deiconify())
 
-    def quit_app(self, icon=None, item=None): # 保持参数兼容性
+    def quit_app(self, icon=None, item=None):
         """退出应用程序。"""
         logging.info("收到退出应用指令。")
-        self.root.after(0, self.root.destroy) # 销毁 Tkinter 窗口
-        os._exit(0) # 强制退出所有线程和进程，确保程序彻底关闭
+        self.root.after(0, self.root.destroy)
+        os._exit(0) 
 
 def load_config():
     """加载配置文件，包含错误处理。"""
@@ -515,4 +456,3 @@ if __name__ == "__main__":
         logging.critical(f"程序 GUI 或 主循环启动时发生严重错误: {e}", exc_info=True)
         messagebox.showerror("严重错误", f"程序启动时发生严重错误！请查看日志文件 '{LOG_FILE}'。\n错误信息：{e}")
         sys.exit(1)
-
