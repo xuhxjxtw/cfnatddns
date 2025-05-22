@@ -1,156 +1,128 @@
-import sys
-import json
-import threading
-import socket
-import requests
 import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
-import pystray
-from PIL import Image, ImageDraw
+import threading
+import json
+import socket
+import requests
+import time
 import os
+from pystray import Icon, Menu, MenuItem
+from PIL import Image
 
 CONFIG_FILE = 'config.json'
-
-def get_public_ip(version='ipv4'):
-    urls = {
-        'ipv4': 'https://api.ipify.org',
-        'ipv6': 'https://api6.ipify.org'
-    }
-    try:
-        return requests.get(urls[version], timeout=5).text.strip()
-    except:
-        return None
-
-def update_cf_dns(cf_config, ip, ip_type, log_func):
-    zone_id = cf_config['zone_id']
-    record_name = cf_config['record_name']
-    email = cf_config['email']
-    api_key = cf_config['api_key']
-
-    headers = {
-        'X-Auth-Email': email,
-        'X-Auth-Key': api_key,
-        'Content-Type': 'application/json'
-    }
-
-    # 查询 DNS 记录
-    try:
-        url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type={ip_type}&name={record_name}"
-        resp = requests.get(url, headers=headers)
-        data = resp.json()
-        if not data['success'] or not data['result']:
-            log_func(f"[{record_name}] 获取现有记录失败")
-            return
-
-        record = data['result'][0]
-        record_id = record['id']
-
-        if record['content'] == ip:
-            log_func(f"[{record_name}] IP 未变化，跳过")
-            return
-
-        update_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
-        payload = {
-            "type": ip_type,
-            "name": record_name,
-            "content": ip,
-            "ttl": 120,
-            "proxied": False
-        }
-        res = requests.put(update_url, headers=headers, json=payload).json()
-        if res['success']:
-            log_func(f"[{record_name}] 更新成功: {ip}")
-        else:
-            log_func(f"[{record_name}] 更新失败: {res}")
-    except Exception as e:
-        log_func(f"[{record_name}] 更新异常: {e}")
-
-def start_listener(name, port, cf_config, log_func):
-    def thread_func():
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(('127.0.0.1', port))
-            sock.listen(5)
-            log_func(f"[{name}] 监听中: 127.0.0.1:{port}")
-            while True:
-                conn, addr = sock.accept()
-                conn.close()
-                log_func(f"[{name}] 收到触发请求: {addr}")
-
-                if cf_config.get('enable_ipv4', True):
-                    ip = get_public_ip('ipv4')
-                    if ip:
-                        update_cf_dns(cf_config, ip, 'A', log_func)
-
-                if cf_config.get('enable_ipv6', False):
-                    ip = get_public_ip('ipv6')
-                    if ip:
-                        update_cf_dns(cf_config, ip, 'AAAA', log_func)
-        except Exception as e:
-            log_func(f"[{name}] 监听异常: {e}")
-    threading.Thread(target=thread_func, daemon=True).start()
 
 class App:
     def __init__(self, root, config):
         self.root = root
         self.config = config
-        self.root.title("CF NAT DDNS")
-        self.root.geometry("600x400")
+        self.root.title("CF DDNS Listener")
+        self.root.geometry("500x300")
         self.text = ScrolledText(self.root, state='disabled')
         self.text.pack(expand=True, fill='both')
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
-
-        self.icon = self.make_icon()
-        self.tray = pystray.Icon("cf_ddns", self.icon, "CF NAT DDNS", self.menu())
-        threading.Thread(target=self.tray.run, daemon=True).start()
-
+        self.icon = None
         self.start_all()
+        self.setup_tray()
 
-    def make_icon(self):
-        img = Image.new('RGB', (64, 64), color='green')
-        d = ImageDraw.Draw(img)
-        d.rectangle([16, 16, 48, 48], fill='white')
-        return img
-
-    def menu(self):
-        return pystray.Menu(
-            pystray.MenuItem("打开窗口", lambda: self.root.after(0, self.show_window)),
-            pystray.MenuItem("退出", self.exit_app)
-        )
-
-    def log(self, msg):
+    def log(self, message):
         self.text.configure(state='normal')
-        self.text.insert('end', msg + '\n')
-        self.text.see('end')
+        self.text.insert(tk.END, f"{time.strftime('%H:%M:%S')} - {message}\n")
         self.text.configure(state='disabled')
-
-    def hide_window(self):
-        self.root.withdraw()
-
-    def show_window(self):
-        self.root.deiconify()
-
-    def exit_app(self):
-        self.tray.stop()
-        self.root.quit()
+        self.text.see(tk.END)
 
     def start_all(self):
         nodes = self.config.get("nodes", {})
-        for name, node in nodes.items():
-            port = node.get("listen_port")
-            cf = node.get("cloudflare")
-            if port and cf:
-                start_listener(name, port, cf, self.log)
+        for name, conf in nodes.items():
+            port = conf.get("listen_port")
+            threading.Thread(target=self.listen, args=(name, port, conf), daemon=True).start()
+            self.log(f"[{name}] 监听中: 127.0.0.1:{port}")
 
-def main():
-    if not os.path.exists(CONFIG_FILE):
-        print("找不到配置文件 config.json")
-        return
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        config = json.load(f)
+    def listen(self, name, port, conf):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", port))
+        s.listen(5)
+        while True:
+            conn, addr = s.accept()
+            conn.close()
+            self.log(f"[{name}] 收到请求: {addr}")
+            threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
+
+    def update_cf(self, name, conf):
+        ip = self.get_public_ip(conf)
+        if not ip:
+            self.log(f"[{name}] 获取公网 IP 失败")
+            return
+
+        headers = {
+            "X-Auth-Email": conf["cloudflare"]["email"],
+            "X-Auth-Key": conf["cloudflare"]["api_key"],
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "type": "A",
+            "name": conf["cloudflare"]["record_name"],
+            "content": ip,
+            "ttl": 120,
+            "proxied": False
+        }
+
+        zone_id = conf["cloudflare"]["zone_id"]
+        record_name = conf["cloudflare"]["record_name"]
+
+        try:
+            # 获取 record_id
+            res = requests.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", headers=headers)
+            recs = res.json().get("result", [])
+            record_id = next((r["id"] for r in recs if r["name"] == record_name), None)
+            if not record_id:
+                self.log(f"[{name}] 找不到 DNS 记录: {record_name}")
+                return
+
+            # 更新
+            res = requests.put(
+                f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
+                headers=headers,
+                json=data
+            )
+
+            if res.json().get("success"):
+                self.log(f"[{name}] 更新成功: {ip}")
+            else:
+                self.log(f"[{name}] 更新失败: {res.text}")
+
+        except Exception as e:
+            self.log(f"[{name}] 异常: {e}")
+
+    def get_public_ip(self, conf):
+        if conf["cloudflare"].get("enable_ipv4", True):
+            try:
+                return requests.get("https://api.ipify.org").text
+            except:
+                return None
+        return None
+
+    def setup_tray(self):
+        if os.path.exists("icon.ico"):
+            image = Image.open("icon.ico")
+        else:
+            image = Image.new("RGB", (64, 64), "blue")
+        menu = Menu(MenuItem("显示", self.show_window), MenuItem("退出", self.quit_app))
+        self.icon = Icon("CFTray", image, "CF DDNS", menu)
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+    def show_window(self, icon, item):
+        self.root.after(0, lambda: self.root.deiconify())
+
+    def quit_app(self, icon, item):
+        icon.stop()
+        self.root.after(0, self.root.destroy)
+
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+if __name__ == "__main__":
     root = tk.Tk()
+    config = load_config()
     app = App(root, config)
     root.mainloop()
-
-if __name__ == '__main__':
-    main()
