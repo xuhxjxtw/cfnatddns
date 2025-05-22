@@ -1,457 +1,327 @@
-import tkinter as tk
-from tkinter.scrolledtext import ScrolledText
-import threading
-import json
-import socket
-import requests
-import time
-import os
+import subprocess
+import re
 import sys
-import logging
-from tkinter import messagebox
+import threading
+import queue
+import os
+import time
+import json
+import requests
 
-# 禁用托盘图标功能，设置为 False
-HAS_TRAY_ICON = False 
+# --- 配置部分 ---
+# 获取当前脚本（或打包后的exe）所在的目录
+current_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
-# --- 日志配置 (在所有代码之前生效，独立于 GUI) ---
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 定义 cfnat 主程序的匹配模式 (通配符)
+# This regex will match any .exe file starting with "cmd_tray-"
+cfnat_program_pattern = re.compile(r"^cmd_tray-.*\.exe$", re.IGNORECASE)
 
-LOG_FILE = os.path.join(BASE_DIR, 'app.log')
-CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
+# 配置文件名称和路径
+config_file_name = "config.json"
+config_file_path = os.path.join(current_dir, config_file_name)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logging.info(f"程序启动，根目录: {BASE_DIR}")
-logging.info(f"配置文件路径: {CONFIG_FILE}")
-logging.info(f"日志文件路径: {LOG_FILE}")
-# --- 日志配置结束 ---
+# 在 config.json 中，你希望使用哪个节点的 Cloudflare 配置来更新 DNS。
+# 此键必须与 config.json 中 "nodes" 下的某个键匹配 (例如 "lax", "sjc")。
+TARGET_CLOUDFLARE_NODE_KEY = "lax" 
 
-def get_local_ip():
-    """尝试获取本地局域网IP地址，排除回环地址和无效地址。"""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip.startswith("127.") or ip == "0.0.0.0":
-            logging.warning(f"检测到回环或无效本地IP: {ip}")
-            raise Exception("Loopback or invalid IP detected")
-        logging.debug(f"成功获取本地局域网 IP: {ip}")
-        return ip
-    except Exception as e:
-        logging.error(f"获取本地局域网 IP 失败: {e}")
-        return None
+# --- 全局变量 ---
+# 用于存储 cfnat 输出行的队列
+ip_queue = queue.Queue()
+# 用于存储所有发现的唯一IP地址的集合
+unique_ips = set()
+# 用于存储 cfnat 最终选择的最佳连接IP
+best_ip_found = None 
+# 存储从 config.json 加载的配置
+app_config = {}
+# 存储实际找到并运行的 cfnat 主程序的完整路径
+cfnat_actual_program_path = None 
 
-class GuiLogHandler(logging.Handler):
-    """将日志消息添加到 Tkinter ScrolledText 控件的队列中。"""
-    def __init__(self, queue):
-        super().__init__()
-        self.queue = queue
-
-    def emit(self, record):
-        msg = self.format(record)
-        self.queue.append(f"{msg}\n")
-
-class App:
-    def __init__(self, root, config):
-        self.root = root
-        self.config = config
-        self.root.title("CF DDNS Listener")
-        self.root.geometry("600x400")
-        
-        self.text = ScrolledText(self.root, state='disabled', wrap='word')
-        self.text.pack(expand=True, fill='both', padx=10, pady=10)
-        
-        self.queue = []
-        self.root.after(100, self._process_log_queue)
-
-        if not any(isinstance(h, GuiLogHandler) for h in logging.getLogger().handlers):
-            self.gui_log_handler = GuiLogHandler(self.queue)
-            logging.getLogger().addHandler(self.gui_log_handler)
-        
-        self.icon = None 
-
-        logging.info("GUI 初始化完成。")
-        self.log_to_gui(f"程序启动，根目录: {BASE_DIR}")
-        self.log_to_gui(f"配置文件路径: {CONFIG_FILE}")
-        self.log_to_gui(f"日志文件路径: {LOG_FILE}")
-        
-        self.start_all()
-
-    def _process_log_queue(self):
-        """定时从队列中取出日志并更新 GUI。"""
-        while self.queue:
-            message = self.queue.pop(0)
-            self.text.configure(state='normal')
-            self.text.insert(tk.END, message)
-            self.text.configure(state='disabled')
-            self.text.see(tk.END)
-        self.root.after(100, self._process_log_queue)
-
-    def log_to_gui(self, message):
-        """将消息添加到 GUI 日志队列。"""
-        formatted_message = f"{time.strftime('%H:%M:%S')} - {message}\n"
-        self.queue.append(formatted_message)
-
-    def start_all(self):
-        """遍历配置文件中的节点并启动监听线程。"""
-        nodes = self.config.get("nodes", {})
-        if not nodes:
-            logging.warning("配置文件中未找到 'nodes' 配置。请检查 config.json。")
-            self.log_to_gui("警告：配置文件中未找到 'nodes' 配置。")
-            return
-
-        for name, conf in nodes.items():
-            port = conf.get("listen_port")
-            if not port:
-                logging.warning(f"节点 '{name}' 未配置 'listen_port'。跳过此节点。")
-                self.log_to_gui(f"警告：节点 '{name}' 未配置 'listen_port'。")
-                continue
-            logging.info(f"启动节点 '{name}' 的监听线程...")
-            threading.Thread(target=self.listen, args=(name, port, conf), daemon=True).start()
-            
-            # 立即启动一个更新线程，确保程序启动后就会立即进行一次 DNS 更新
-            logging.info(f"[{name}] 立即启动首次 DNS 更新。")
-            threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
-
-
-    def listen(self, name, port, conf):
-        """
-        监听指定端口的连接，并在收到请求时触发 DNS 更新。
-        同时包含周期性更新逻辑。
-        """
-        host_ip = get_local_ip()
-        if not host_ip:
-            logging.error(f"[{name}] 未能获取有效局域网 IP，监听线程退出。")
-            self.log_to_gui(f"[{name}] 未能获取有效局域网 IP，监听失败")
-            return
-        
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            logging.info(f"[{name}] 尝试绑定: {host_ip}:{port}")
-            s.bind((host_ip, port))
-            logging.info(f"[{name}] 成功绑定: {host_ip}:{port}")
-        except Exception as e:
-            logging.error(f"[{name}] 绑定失败 {host_ip}:{port} 错误: {e}")
-            self.log_to_gui(f"[{name}] 绑定失败 {host_ip}:{port} 错误: {e}")
-            return
-        
-        s.listen(5)
-        logging.info(f"[{name}] 正在监听: {host_ip}:{port}")
-        self.log_to_gui(f"[{name}] 正在监听: {host_ip}:{port}")
-        
-        last_periodic_update_time = time.time()
-        periodic_update_interval = 300 # 每 5 分钟更新一次 (300秒)
-
-        while True:
-            try:
-                s.settimeout(1.0)
-                conn, addr = s.accept()
-                conn.close()
-                logging.info(f"[{name}] 收到来自 {addr} 的请求。触发 DNS 更新。")
-                self.log_to_gui(f"[{name}] 收到请求: {addr}，触发更新。")
-                threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
-                last_periodic_update_time = time.time()
-            except socket.timeout:
-                pass
-            except Exception as e:
-                logging.error(f"[{name}] 监听循环中发生异常: {e}", exc_info=True)
-                self.log_to_gui(f"[{name}] 监听循环中发生异常: {e}")
-                time.sleep(1)
-
-            if time.time() - last_periodic_update_time > periodic_update_interval:
-                logging.info(f"[{name}] 达到周期更新时间 ({periodic_update_interval}秒)，触发 DNS 更新。")
-                self.log_to_gui(f"[{name}] 达到周期更新时间，触发 DNS 更新。")
-                threading.Thread(target=self.update_cf, args=(name, conf), daemon=True).start()
-                last_periodic_update_time = time.time()
-
-
-    def update_cf(self, name, conf):
-        """获取公网IP并更新Cloudflare DNS记录。"""
-        if "cloudflare" not in conf:
-            logging.error(f"[{name}] 配置中缺少 'cloudflare' 部分。")
-            self.log_to_gui(f"[{name}] 配置中缺少 'cloudflare' 部分。")
-            return
-        cf_conf = conf["cloudflare"]
-        required_cf_keys = ["email", "api_key", "zone_id", "record_name"]
-        if not all(key in cf_conf for key in required_cf_keys):
-            logging.error(f"[{name}] Cloudflare 配置不完整，缺少必需字段。")
-            self.log_to_gui(f"[{name}] Cloudflare 配置不完整。")
-            return
-
-        # 获取公网 IP (通过 V2Ray 代理访问 cfnat 获取)
-        ip = self.get_public_ip(conf)
-        if not ip:
-            logging.error(f"[{name}] 获取公网 IP 失败，无法更新 DNS。")
-            self.log_to_gui(f"[{name}] 获取公网 IP 失败")
-            return
-        
-        logging.info(f"[{name}] 获取到公网 IP: {ip}")
-
-        headers = {
-            "X-Auth-Email": cf_conf["email"],
-            "X-Auth-Key": cf_conf["api_key"],
-            "Content-Type": "application/json"
-        }
-
-        base_url = f"https://api.cloudflare.com/client/v4/zones/{cf_conf['zone_id']}/dns_records"
-        record_name = cf_conf["record_name"]
-
-        try:
-            # 1. 查询现有 DNS 记录
-            logging.info(f"[{name}] 查询 Cloudflare DNS 记录: {record_name}")
-            res = requests.get(
-                f"{base_url}?name={record_name}&type=A", 
-                headers=headers,
-                timeout=10
-            )
-            res.raise_for_status()
-            recs = res.json().get("result", [])
-            
-            record_id = None
-            current_ip = None
-            for r in recs:
-                if r["name"] == record_name and r["type"] == "A":
-                    record_id = r["id"]
-                    current_ip = r["content"]
-                    break
-
-            if not record_id:
-                logging.warning(f"[{name}] 找不到现有 DNS 记录 '{record_name}'，尝试创建新记录。")
-                create_data = {
-                    "type": "A",
-                    "name": record_name,
-                    "content": ip,
-                    "ttl": 120,
-                    "proxied": cf_conf.get("proxied", False)
-                }
-                res = requests.post(
-                    base_url,
-                    headers=headers,
-                    json=create_data,
-                    timeout=10
-                )
-                res.raise_for_status()
-                if res.json().get("success"):
-                    logging.info(f"[{name}] 成功创建 DNS 记录 '{record_name}'，IP: {ip}")
-                    self.log_to_gui(f"[{name}] 创建成功: {ip}")
-                else:
-                    logging.error(f"[{name}] 创建 DNS 记录失败: {res.text}")
-                    self.log_to_gui(f"[{name}] 创建失败: {res.text}")
-                return
-
-            if current_ip == ip:
-                logging.info(f"[{name}] IP 地址未变化 ({ip})，无需更新。")
-                self.log_to_gui(f"[{name}] IP 未变: {ip}")
-                return
-
-            # 2. 更新 DNS 记录
-            logging.info(f"[{name}] IP 地址已变化，正在更新 DNS 记录。旧IP: {current_ip}, 新IP: {ip}")
-            update_data = {
-                "type": "A",
-                "name": record_name,
-                "content": ip,
-                "ttl": 120,
-                "proxied": cf_conf.get("proxied", False)
-            }
-            res = requests.put(
-                f"{base_url}/{record_id}",
-                headers=headers,
-                json=update_data,
-                timeout=10
-            )
-            res.raise_for_status()
-
-            if res.json().get("success"):
-                logging.info(f"[{name}] DNS 记录更新成功: {ip}")
-                self.log_to_gui(f"[{name}] 更新成功: {ip}")
-            else:
-                logging.error(f"[{name}] DNS 记录更新失败: {res.text}")
-                self.log_to_gui(f"[{name}] 更新失败: {res.text}")
-
-        except requests.exceptions.RequestException as e:
-            logging.error(f"[{name}] Cloudflare API 请求失败: {e}", exc_info=True)
-            self.log_to_gui(f"[{name}] Cloudflare API 错误: {e}")
-        except json.JSONDecodeError as e:
-            logging.error(f"[{name}] Cloudflare API 响应解析失败: {e}，响应: {res.text if 'res' in locals() else '无响应'}", exc_info=True)
-            self.log_to_gui(f"[{name}] Cloudflare 响应解析错误: {e}")
-        except Exception as e:
-            logging.error(f"[{name}] 更新 Cloudflare DNS 记录时发生未预期异常: {e}", exc_info=True)
-            self.log_to_gui(f"[{name}] 更新异常: {e}")
-
-    def get_public_ip(self, conf):
-        """
-        通过硬编码的 V2Ray 本地代理 URL 访问 cfnat 提供的内网 IP 接口获取公网 IP 地址。
-        如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口。
-        """
-        # !!! 关键：请将此 URL 替换为您的 V2Ray 客户端在本地监听的 SOCKS5 或 HTTP 代理地址 !!!
-        # 例如： "socks5://127.0.0.1:1080" 或 "http://127.0.0.1:8888"
-        # 如果您没有 V2Ray 客户端运行本地代理，或者不希望通过代理，请将此变量设置为空字符串： V2RAY_LOCAL_PROXY_URL = ""
-        V2RAY_LOCAL_PROXY_URL = "socks5://127.0.0.1:1080" # <-- ！！！请替换此行！！！
-
-        proxies = {"http": V2RAY_LOCAL_PROXY_URL, "https": V2RAY_LOCAL_PROXY_URL} if V2RAY_LOCAL_PROXY_URL else None
-
-        # 禁用 SSL 证书验证警告，因为代理或内网服务可能没有有效证书
-        if proxies:
-            requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-
-        port = conf.get("listen_port", 0) # 获取当前节点的监听端口
-        cfnat_target_ip = "127.0.0.1" # cfnat 在本地回环地址提供服务
-
-        ip4 = None
-        ip6 = None
-        
-        # 尝试通过 V2Ray 代理访问 cfnat 获取 IPv4
-        if conf["cloudflare"].get("enable_ipv4", True):
-            cfnat_ipv4_url = f"https://{cfnat_target_ip}:{port}/ipv4" # 假设 cfnat 在 /ipv4 路径提供，且为 HTTPS
-            try:
-                logging.info(f"尝试通过 V2Ray 代理访问 cfnat 获取 IPv4: {cfnat_ipv4_url}")
-                resp = requests.get(cfnat_ipv4_url, timeout=5, proxies=proxies, verify=False) 
-                if resp.status_code == 200 and resp.text.strip():
-                    ip4_candidate = resp.text.strip()
-                    if self._is_valid_ipv4(ip4_candidate):
-                        ip4 = ip4_candidate
-                        logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 成功: {ip4}")
-                    else:
-                        logging.warning(f"通过 V2Ray 代理访问 cfnat 返回的 IPv4 格式不正确: '{ip4_candidate}'")
-                else:
-                    logging.warning(f"通过 V2Ray 代理访问 cfnat IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-            except Exception as e:
-                logging.error(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 失败: {e}")
-            
-            # 如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口获取 IPv4
-            if not ip4:
-                try:
-                    logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 失败，回退到直连公共接口: https://4.ipw.cn")
-                    resp = requests.get("https://4.ipw.cn", timeout=5) # 直连，不需要代理
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip4_candidate = resp.text.strip()
-                        if self._is_valid_ipv4(ip4_candidate):
-                            ip4 = ip4_candidate
-                            logging.info(f"通过直连公共接口获取 IPv4 成功: {ip4}")
-                        else:
-                            logging.warning(f"直连公共接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
-                    else:
-                        logging.warning(f"直连公共接口获取 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-                except Exception as e:
-                    logging.error(f"直连公共接口获取 IPv4 失败: {e}")
-
-        # 尝试通过 V2Ray 代理访问 cfnat 获取 IPv6
-        if conf["cloudflare"].get("enable_ipv6", False):
-            cfnat_ipv6_url = f"https://{cfnat_target_ip}:{port}/ipv6" # 假设 cfnat 在 /ipv6 路径提供，且为 HTTPS
-            try:
-                logging.info(f"尝试通过 V2Ray 代理访问 cfnat 获取 IPv6: {cfnat_ipv6_url}")
-                resp = requests.get(cfnat_ipv6_url, timeout=5, proxies=proxies, verify=False) 
-                if resp.status_code == 200 and resp.text.strip():
-                    ip6_candidate = resp.text.strip()
-                    if self._is_valid_ipv6(ip6_candidate):
-                        ip6 = ip6_candidate
-                        logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 成功: {ip6}")
-                    else:
-                        logging.warning(f"通过 V2Ray 代理访问 cfnat 返回的 IPv6 格式不正确: '{ip6_candidate}'")
-                else:
-                    logging.warning(f"通过 V2Ray 代理访问 cfnat IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
-            except Exception as e:
-                logging.error(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 失败: {e}")
-            
-            # 如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口获取 IPv6
-            if not ip6:
-                try:
-                    logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 失败，回退到直连公共接口: https://6.ipw.cn")
-                    resp = requests.get("https://6.ipw.cn", timeout=5) # 直连，不需要代理
-                    if resp.status_code == 200 and resp.text.strip():
-                        ip6_candidate = resp.text.strip()
-                        if self._is_valid_ipv6(ip6_candidate):
-                            ip6 = ip6_candidate
-                            logging.info(f"通过直连公共接口获取 IPv6 成功: {ip6}")
-                        else:
-                            logging.warning(f"直连公共接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
-                except Exception as e:
-                    logging.error(f"直连公共接口获取 IPv6 失败: {e}")
-
-        if ip4:
-            return ip4
-        if ip6:
-            return ip6 
-        
-        logging.error("未能获取任何有效的公网 IP 地址。")
-        return None
-
-    def _is_valid_ipv4(self, ip_str):
-        """验证字符串是否为有效的 IPv4 地址。"""
-        try:
-            socket.inet_pton(socket.AF_INET, ip_str)
-            return True
-        except socket.error:
-            return False
-
-    def _is_valid_ipv6(self, ip_str):
-        """验证字符串是否为有效的 IPv6 地址。"""
-        try:
-            socket.inet_pton(socket.AF_INET6, ip_str)
-            return True
-        except socket.error:
-            return False
-
-    def show_window(self, icon=None, item=None):
-        """显示主窗口。"""
-        self.root.after(0, lambda: self.root.deiconify())
-
-    def quit_app(self, icon=None, item=None):
-        """退出应用程序。"""
-        logging.info("收到退出应用指令。")
-        self.root.after(0, self.root.destroy)
-        os._exit(0) 
-
+# --- 函数：加载配置文件 ---
 def load_config():
-    """加载配置文件，包含错误处理。"""
-    logging.info(f"尝试加载配置文件: {CONFIG_FILE}")
+    """
+    从 config.json 文件加载配置信息。
+    """
+    global app_config
+    if not os.path.exists(config_file_path):
+        print(f"错误: 配置文件 '{config_file_name}' 未找到于 '{current_dir}'。")
+        print("请确保 config.json 与 cfnatddns.exe 在同一目录下。")
+        input("按任意键退出...")
+        sys.exit(1)
+
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(config_file_path, 'r', encoding='utf-8') as f:
+            app_config = json.load(f)
+        print(f"成功加载配置文件: {config_file_path}")
+        # 验证目标节点配置是否存在
+        if TARGET_CLOUDFLARE_NODE_KEY not in app_config.get("nodes", {}):
+            print(f"错误: 配置文件中未找到目标节点 '{TARGET_CLOUDFLARE_NODE_KEY}' 的配置。")
+            input("按任意键退出...")
+            sys.exit(1)
+        if "cloudflare" not in app_config["nodes"][TARGET_CLOUDFLARE_NODE_KEY]:
+            print(f"错误: 目标节点 '{TARGET_CLOUDFLARE_NODE_KEY}' 中未找到 'cloudflare' 配置。")
+            input("按任意键退出...")
+            sys.exit(1)
+            
+    except json.JSONDecodeError as e:
+        print(f"错误: 解析配置文件 '{config_file_name}' 失败。请检查JSON格式: {e}")
+        input("按任意键退出...")
+        sys.exit(1)
+    except Exception as e:
+        print(f"加载配置文件时发生未知错误: {e}")
+        input("按任意键退出...")
+        sys.exit(1)
+
+# --- 函数：更新 Cloudflare DNS 记录 ---
+def update_cloudflare_dns(ip_address, cloudflare_settings):
+    """
+    使用 Cloudflare API 更新 DNS 记录。
+    """
+    print(f"\n--- 正在尝试更新 Cloudflare DNS 记录 ---")
+    email = cloudflare_settings.get("email")
+    api_key = cloudflare_settings.get("api_key")
+    zone_id = cloudflare_settings.get("zone_id")
+    record_name = cloudflare_settings.get("record_name")
+    enable_ipv4 = cloudflare_settings.get("enable_ipv4", False)
+    enable_ipv6 = cloudflare_settings.get("enable_ipv6", False)
+
+    if not all([email, api_key, zone_id, record_name]):
+        print("错误: Cloudflare 配置信息不完整。无法更新 DNS。")
+        return
+
+    # 判断IP类型 (IPv4 或 IPv6)
+    is_ipv4 = re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_address)
+    is_ipv6 = re.match(r'^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,7}:[0-9a-fA-F]{0,4}$', ip_address)
+
+    record_type = None
+    if is_ipv4 and enable_ipv4:
+        record_type = "A"
+    elif is_ipv6 and enable_ipv6:
+        record_type = "AAAA"
+    else:
+        print(f"警告: IP地址 '{ip_address}' 类型与配置中启用的IPv4/IPv6不匹配，或未启用对应类型。跳过更新。")
+        return
+
+    print(f"准备更新 DNS 记录: 域名={record_name}, 类型={record_type}, 新IP={ip_address}")
+
+    headers = {
+        "X-Auth-Email": email,
+        "X-Auth-Key": api_key,
+        "Content-Type": "application/json"
+    }
+
+    # 1. 获取现有 DNS 记录 ID
+    list_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type={record_type}&name={record_name}"
+    try:
+        response = requests.get(list_url, headers=headers, timeout=10)
+        response.raise_for_status() # 检查 HTTP 状态码
+        data = response.json()
+
+        if data["success"] and data["result"]:
+            record_id = data["result"][0]["id"]
+            current_ip = data["result"][0]["content"]
+            print(f"找到现有记录: ID={record_id}, 当前IP={current_ip}")
+
+            if current_ip == ip_address:
+                print("当前IP与新IP相同，无需更新。")
+                return
+        else:
+            print(f"未找到现有记录 '{record_name}' ({record_type})。尝试创建新记录。")
+            record_id = None # 表示需要创建
+
+    except requests.exceptions.RequestException as e:
+        print(f"获取 DNS 记录失败: {e}")
+        return
+    except Exception as e:
+        print(f"处理获取 DNS 记录响应时发生错误: {e}")
+        return
+
+    # 2. 更新或创建 DNS 记录
+    payload = {
+        "type": record_type,
+        "name": record_name,
+        "content": ip_address,
+        "ttl": 1, # TTL 1 表示自动，或者你可以设置一个具体值
+        "proxied": True # 通常 DDNS 希望开启代理，如果不需要可以改为 False
+    }
+
+    if record_id:
+        # 更新现有记录
+        update_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+        try:
+            response = requests.put(update_url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data["success"]:
+                print(f"DNS 记录 '{record_name}' 更新成功！新IP: {ip_address}")
+            else:
+                print(f"DNS 记录更新失败: {data.get('errors', '未知错误')}")
+        except requests.exceptions.RequestException as e:
+            print(f"更新 DNS 记录失败: {e}")
+        except Exception as e:
+            print(f"处理更新 DNS 记录响应时发生错误: {e}")
+    else:
+        # 创建新记录
+        create_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+        try:
+            response = requests.post(create_url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data["success"]:
+                print(f"DNS 记录 '{record_name}' 创建成功！IP: {ip_address}")
+            else:
+                print(f"DNS 记录创建失败: {data.get('errors', '未知错误')}")
+        except requests.exceptions.RequestException as e:
+            print(f"创建 DNS 记录失败: {e}")
+        except Exception as e:
+            print(f"处理创建 DNS 记录响应时发生错误: {e}")
+
+# --- 线程函数：从子进程输出流中读取 ---
+def enqueue_output(out, q):
+    """
+    从子进程的输出流中读取行并放入队列。
+    """
+    for line in iter(out.readline, b''): 
+        try:
+            q.put(line.decode('utf-8', errors='ignore').strip()) 
+        except Exception as e:
+            print(f"解码 cfnat 输出时发生错误: {e}")
+    out.close()
+
+# --- 主逻辑：处理 cfnat 输出并提取IP ---
+def process_cfnat_output():
+    global best_ip_found 
+    global cfnat_actual_program_path # 允许修改全局变量
+
+    print("--- cfnatddns 启动中 ---")
+    print(f"当前目录: {current_dir}")
+
+    # --- 步骤 1: 动态查找 cfnat 主程序 ---
+    found_programs = []
+    for filename in os.listdir(current_dir):
+        # 检查是否是文件且文件名匹配模式
+        if os.path.isfile(os.path.join(current_dir, filename)) and cfnat_program_pattern.match(filename):
+            found_programs.append(filename)
+
+    if not found_programs:
+        print(f"错误: 在 '{current_dir}' 目录下未找到符合 'cmd_tray-*.exe' 模式的程序。")
+        print("请确保 cmd_tray-xxx.exe (例如 cmd_tray-HKG.exe) 与 cfnatddns.exe 在同一目录下。")
+        input("按任意键退出...")
+        return # 退出函数
+
+    if len(found_programs) > 1:
+        print("警告: 找到多个符合 'cmd_tray-*.exe' 模式的程序:")
+        for p in found_programs:
+            print(f"- {p}")
+        print(f"将默认使用第一个找到的程序: {found_programs[0]}")
+        cfnat_actual_program_name = found_programs[0]
+    else:
+        cfnat_actual_program_name = found_programs[0]
+        print(f"找到主程序: {cfnat_actual_program_name}")
+
+    cfnat_actual_program_path = os.path.join(current_dir, cfnat_actual_program_name)
+    print(f"主程序完整路径: {cfnat_actual_program_path}")
+
+    # --- 步骤 2: 启动主程序并捕获其输出 ---
+    try:
+        proc = subprocess.Popen([cfnat_actual_program_path], 
+                                stdout=subprocess.PIPE,  
+                                stderr=subprocess.PIPE,  
+                                bufsize=1,               
+                                universal_newlines=False) 
     except FileNotFoundError:
-        raise FileNotFoundError(f"未找到配置文件！请确保 '{CONFIG_FILE}' 存在于 EXE 相同目录下。")
-    except json.JSONDecodeError as e:
-        raise json.JSONDecodeError(f"配置文件 '{CONFIG_FILE}' 格式不正确，请检查 JSON 语法。", e.doc, e.pos)
+        print(f"错误: 无法启动程序 '{cfnat_actual_program_path}'。请检查路径或权限。")
+        input("按任意键退出...")
+        return
     except Exception as e:
-        raise Exception(f"加载配置文件时发生未知错误: {e}")
+        print(f"启动主程序时发生未知错误: {e}")
+        input("按任意键退出...")
+        return
 
+    # --- 步骤 3: 使用线程实时读取输出 ---
+    stdout_thread = threading.Thread(target=enqueue_output, args=(proc.stdout, ip_queue))
+    stderr_thread = threading.Thread(target=enqueue_output, args=(proc.stderr, ip_queue))
+
+    stdout_thread.daemon = True 
+    stderr_thread.daemon = True
+
+    stdout_thread.start()
+    stderr_thread.start()
+
+    print("\n正在捕获主程序输出并提取IPs...")
+    print("-----------------------------------")
+
+    # --- 步骤 4: 主循环：从队列中获取输出并处理 ---
+    # 正则表达式来查找IPv4地址
+    ipv4_pattern = r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+    # 正则表达式来查找IPv6地址（根据你截图中的格式）
+    ipv6_pattern = r'\[([0-9a-fA-F:]+)\]:\d+' 
+    # 正则表达式来匹配“选择最佳连接”行，并捕获IPv6地址和延迟
+    best_connection_pattern = r'选择 最佳 连接 : 地址 : \[(?P<ipv6>[0-9a-fA-F:]+)\]:\d+ 延迟 : (?P<latency>\d+) ms'
+
+    while True:
+        try:
+            line = ip_queue.get(timeout=0.5) 
+            print(f"[主程序] {line}") 
+
+            # 查找IPv4地址
+            ipv4_matches = re.findall(ipv4_pattern, line)
+            for ip in ipv4_matches:
+                if ip not in unique_ips:
+                    unique_ips.add(ip)
+                    print(f"新发现IPv4: {ip}")
+
+            # 查找IPv6地址
+            ipv6_matches = re.findall(ipv6_pattern, line)
+            for ip in ipv6_matches:
+                if ip not in unique_ips:
+                    unique_ips.add(ip)
+                    print(f"新发现IPv6: {ip}")
+            
+            # 尝试匹配“选择最佳连接”行来获取最佳IP
+            best_match = re.search(best_connection_pattern, line)
+            if best_match:
+                best_ip_found = best_match.group('ipv6')
+                latency = best_match.group('latency')
+                print(f"主程序已选择最佳连接: {best_ip_found} (延迟: {latency} ms)")
+                
+                # --- DDNS 更新逻辑 ---
+                # 获取目标节点的 Cloudflare 配置
+                target_node_config = app_config["nodes"][TARGET_CLOUDFLARE_NODE_KEY]["cloudflare"]
+                update_cloudflare_dns(best_ip_found, target_node_config)
+                # 最佳IP已经找到并更新，如果cfnat程序会持续运行并更新，则可以继续循环
+                # 如果cfnat只是运行一次就退出，那么通常DDNS更新后就可以让脚本退出了。
+                # 如果你想在更新后立即退出，可以取消注释下面这行：
+                # return 
+                # --- DDNS 更新逻辑结束 ---
+
+        except queue.Empty:
+            # 队列为空，检查子进程是否还在运行
+            if proc.poll() is not None: 
+                print("\n主程序已结束，或无更多输出。")
+                break 
+
+        except Exception as e:
+            print(f"处理主程序输出时发生错误: {e}")
+
+    # --- 步骤 5: 等待子进程完全结束 ---
+    proc.wait() 
+
+    print("\n--- 任务完成 ---")
+    print("所有提取到的唯一IP地址：")
+    if unique_ips:
+        for ip in sorted(list(unique_ips)):
+            print(ip)
+    else:
+        print("未从主程序输出中提取到任何IP地址。")
+    
+    if best_ip_found:
+        print(f"\n主程序最终选择的最佳连接IP: {best_ip_found}")
+    else:
+        print("\n未从主程序输出中找到明确的最佳连接IP。")
+
+# --- 主程序入口点 ---
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
-
-    app_config = None
-    try:
-        app_config = load_config()
-        logging.info("配置文件加载成功！")
-    except FileNotFoundError as e:
-        logging.critical(f"严重错误：{e} 程序将退出。")
-        messagebox.showerror("错误", str(e))
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        logging.critical(f"严重错误：{e} 程序将退出。", exc_info=True)
-        messagebox.showerror("错误", str(e))
-        sys.exit(1)
-    except Exception as e:
-        logging.critical(f"严重错误：{e} 程序将退出。", exc_info=True)
-        messagebox.showerror("错误", str(e))
-        sys.exit(1)
-
-    try:
-        app = App(root, app_config)
-        root.protocol("WM_DELETE_WINDOW", lambda: root.withdraw())
-        root.mainloop()
-    except Exception as e:
-        logging.critical(f"程序 GUI 或 主循环启动时发生严重错误: {e}", exc_info=True)
-        messagebox.showerror("严重错误", f"程序启动时发生严重错误！请查看日志文件 '{LOG_FILE}'。\n错误信息：{e}")
-        sys.exit(1)
+    load_config() # 首先加载配置文件
+    process_cfnat_output()
+    # 保持命令行窗口打开，直到用户按下任意键
+    input("\n按 Enter 键退出...") 
