@@ -1,2 +1,0 @@
-1234 example.com A
-1238 example.com AAAA
