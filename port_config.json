@@ -1,0 +1,11 @@
+{
+  "hkg1": {
+    "listen_port": 12345,
+    "cloudflare": {
+      "api_token": "your_cf_token",
+      "zone_id": "your_zone_id",
+      "record_id": "your_record_id",
+      "record_name": "cf-hkg1.example.com"
+    }
+  }
+}
