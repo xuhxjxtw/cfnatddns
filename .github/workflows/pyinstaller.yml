@@ -31,7 +31,7 @@ jobs:
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
           copy config.json dist_bundle\\
-          # 移除复制 icon.ico 的行
+          # 移除复制 icon.ico 的行，因为不再需要
           # copy icon.ico dist_bundle\\
 
       - name: Zip output
