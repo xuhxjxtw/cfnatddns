@@ -189,7 +189,7 @@ class App:
             self.log_to_gui(f"[{name}] Cloudflare 配置不完整。")
             return
 
-        # 获取公网 IP (通过代理获取，失败则回退到直连)
+        # 获取公网 IP (通过 V2Ray 代理访问 cfnat 获取)
         ip = self.get_public_ip(conf)
         if not ip:
             logging.error(f"[{name}] 获取公网 IP 失败，无法更新 DNS。")
@@ -291,12 +291,12 @@ class App:
 
     def get_public_ip(self, conf):
         """
-        通过硬编码的 V2Ray 本地代理 URL 获取公网 IP 地址。
-        如果代理获取失败，则回退到直连公共 IP 查询接口。
+        通过硬编码的 V2Ray 本地代理 URL 访问 cfnat 提供的内网 IP 接口获取公网 IP 地址。
+        如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口。
         """
-        # !!! 请将此 URL 替换为您的 V2Ray 客户端在本地监听的 SOCKS5 或 HTTP 代理地址 !!!
+        # !!! 关键：请将此 URL 替换为您的 V2Ray 客户端在本地监听的 SOCKS5 或 HTTP 代理地址 !!!
         # 例如： "socks5://127.0.0.1:1080" 或 "http://127.0.0.1:8888"
-        # 如果您没有 V2Ray 客户端，或者不希望通过代理，请将此变量设置为空字符串： V2RAY_LOCAL_PROXY_URL = ""
+        # 如果您没有 V2Ray 客户端运行本地代理，或者不希望通过代理，请将此变量设置为空字符串： V2RAY_LOCAL_PROXY_URL = ""
         V2RAY_LOCAL_PROXY_URL = "socks5://127.0.0.1:1080" # <-- ！！！请替换此行！！！
 
         proxies = {"http": V2RAY_LOCAL_PROXY_URL, "https": V2RAY_LOCAL_PROXY_URL} if V2RAY_LOCAL_PROXY_URL else None
@@ -305,44 +305,79 @@ class App:
         if proxies:
             requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
+        port = conf.get("listen_port", 0) # 获取当前节点的监听端口
+        cfnat_target_ip = "127.0.0.1" # cfnat 在本地回环地址提供服务
+
         ip4 = None
         ip6 = None
         
-        # 获取 IPv4
+        # 尝试通过 V2Ray 代理访问 cfnat 获取 IPv4
         if conf["cloudflare"].get("enable_ipv4", True):
+            cfnat_ipv4_url = f"https://{cfnat_target_ip}:{port}/ipv4" # 假设 cfnat 在 /ipv4 路径提供，且为 HTTPS
             try:
-                logging.info(f"尝试通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv4: https://4.ipw.cn")
-                # V2Ray 代理通常会处理外部 HTTPS 网站的证书，但为了兼容性，这里仍然禁用 verify
-                resp = requests.get("https://4.ipw.cn", timeout=5, proxies=proxies, verify=False)
+                logging.info(f"尝试通过 V2Ray 代理访问 cfnat 获取 IPv4: {cfnat_ipv4_url}")
+                resp = requests.get(cfnat_ipv4_url, timeout=5, proxies=proxies, verify=False) 
                 if resp.status_code == 200 and resp.text.strip():
                     ip4_candidate = resp.text.strip()
                     if self._is_valid_ipv4(ip4_candidate):
                         ip4 = ip4_candidate
-                        logging.info(f"通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv4 成功: {ip4}")
+                        logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 成功: {ip4}")
                     else:
-                        logging.warning(f"获取的 IPv4 格式不正确: '{ip4_candidate}'")
+                        logging.warning(f"通过 V2Ray 代理访问 cfnat 返回的 IPv4 格式不正确: '{ip4_candidate}'")
                 else:
-                    logging.warning(f"获取 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                    logging.warning(f"通过 V2Ray 代理访问 cfnat IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
             except Exception as e:
-                logging.error(f"通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv4 失败: {e}")
+                logging.error(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 失败: {e}")
+            
+            # 如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口获取 IPv4
+            if not ip4:
+                try:
+                    logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv4 失败，回退到直连公共接口: https://4.ipw.cn")
+                    resp = requests.get("https://4.ipw.cn", timeout=5) # 直连，不需要代理
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip4_candidate = resp.text.strip()
+                        if self._is_valid_ipv4(ip4_candidate):
+                            ip4 = ip4_candidate
+                            logging.info(f"通过直连公共接口获取 IPv4 成功: {ip4}")
+                        else:
+                            logging.warning(f"直连公共接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
+                    else:
+                        logging.warning(f"直连公共接口获取 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                except Exception as e:
+                    logging.error(f"直连公共接口获取 IPv4 失败: {e}")
 
-        # 获取 IPv6
+        # 尝试通过 V2Ray 代理访问 cfnat 获取 IPv6
         if conf["cloudflare"].get("enable_ipv6", False):
+            cfnat_ipv6_url = f"https://{cfnat_target_ip}:{port}/ipv6" # 假设 cfnat 在 /ipv6 路径提供，且为 HTTPS
             try:
-                logging.info(f"尝试通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv6: https://6.ipw.cn")
-                # V2Ray 代理通常会处理外部 HTTPS 网站的证书，但为了兼容性，这里仍然禁用 verify
-                resp = requests.get("https://6.ipw.cn", timeout=5, proxies=proxies, verify=False)
+                logging.info(f"尝试通过 V2Ray 代理访问 cfnat 获取 IPv6: {cfnat_ipv6_url}")
+                resp = requests.get(cfnat_ipv6_url, timeout=5, proxies=proxies, verify=False) 
                 if resp.status_code == 200 and resp.text.strip():
                     ip6_candidate = resp.text.strip()
                     if self._is_valid_ipv6(ip6_candidate):
                         ip6 = ip6_candidate
-                        logging.info(f"通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv6 成功: {ip6}")
+                        logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 成功: {ip6}")
                     else:
-                        logging.warning(f"获取的 IPv6 格式不正确: '{ip6_candidate}'")
+                        logging.warning(f"通过 V2Ray 代理访问 cfnat 返回的 IPv6 格式不正确: '{ip6_candidate}'")
                 else:
-                    logging.warning(f"获取 IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                    logging.warning(f"通过 V2Ray 代理访问 cfnat IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
             except Exception as e:
-                logging.error(f"通过 {'V2Ray 代理' if proxies else '直连'} 获取 IPv6 失败: {e}")
+                logging.error(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 失败: {e}")
+            
+            # 如果通过代理访问 cfnat 失败，则回退到直连公共 IP 查询接口获取 IPv6
+            if not ip6:
+                try:
+                    logging.info(f"通过 V2Ray 代理访问 cfnat 获取 IPv6 失败，回退到直连公共接口: https://6.ipw.cn")
+                    resp = requests.get("https://6.ipw.cn", timeout=5) # 直连，不需要代理
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip6_candidate = resp.text.strip()
+                        if self._is_valid_ipv6(ip6_candidate):
+                            ip6 = ip6_candidate
+                            logging.info(f"通过直连公共接口获取 IPv6 成功: {ip6}")
+                        else:
+                            logging.warning(f"直连公共接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
+                except Exception as e:
+                    logging.error(f"直连公共接口获取 IPv6 失败: {e}")
 
         if ip4:
             return ip4
