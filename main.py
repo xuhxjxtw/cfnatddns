@@ -1,108 +1,86 @@
+
 import socket
 import threading
 import requests
 import time
-import logging
-import sys
 import os
+from tkinter import messagebox
+from pystray import Icon, Menu, MenuItem
+from PIL import Image
 
-# 设置日志输出（控制台和文件）
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler("cfddns.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-
-CONFIG_FILE = 'config.txt'
-CF_API_TOKEN = 'your_token_here'
-CF_ZONE_ID = 'your_zone_id_here'
-CF_API_BASE = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records"
-
-domain_map = {}
+CONFIG_PATH = 'config.txt'
+SECRET_PATH = 'config_secret.txt'
 
 def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        logging.error("找不到 config.txt 配置文件")
-        sys.exit(1)
-
-    with open(CONFIG_FILE, 'r') as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) != 3:
-                continue
+    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    config = []
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) == 3:
             port, domain, rtype = parts
-            domain_map[int(port)] = {'domain': domain, 'type': rtype.upper()}
+            config.append((int(port), domain, rtype.upper()))
+    return config
 
+def load_secrets():
+    with open(SECRET_PATH, 'r', encoding='utf-8') as f:
+        lines = f.read().strip().splitlines()
+    return lines[0], lines[1]
 
-def update_cf(domain, ip, rtype):
+def update_dns(domain, ip, rtype, token, zone_id):
     headers = {
-        'Authorization': f'Bearer {CF_API_TOKEN}',
-        'Content-Type': 'application/json'
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
     }
-    params = {
-        'name': domain,
-        'match': 'all'
-    }
-    try:
-        r = requests.get(CF_API_BASE, headers=headers, params=params)
-        records = r.json()
-        for rec in records['result']:
-            if rec['type'] == rtype:
-                record_id = rec['id']
-                data = {
-                    'type': rtype,
-                    'name': domain,
-                    'content': ip,
-                    'ttl': 1,
-                    'proxied': False
-                }
-                res = requests.put(f"{CF_API_BASE}/{record_id}", headers=headers, json=data)
-                if res.status_code == 200:
-                    logging.info(f"[{domain}] DNS 更新成功: {ip}")
-                else:
-                    logging.warning(f"[{domain}] 更新失败: {res.text}")
-                return
-        logging.warning(f"[{domain}] 没找到匹配的记录")
-    except Exception as e:
-        logging.error(f"[{domain}] 请求异常: {e}")
-
-
-def listen_on_port(port, domain, rtype):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(('127.0.0.1', port))
-        sock.listen(5)
-        logging.info(f"监听端口 {port} 成功: {domain} ({rtype})")
-    except Exception as e:
-        logging.error(f"监听端口 {port} 失败: {e}")
+    list_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
+    params = {"type": rtype, "name": domain}
+    r = requests.get(list_url, headers=headers, params=params)
+    data = r.json()
+    if not data['success'] or not data['result']:
+        print(f"[Cloudflare] 记录不存在：{domain}")
         return
+    record_id = data['result'][0]['id']
+    update_url = f"{list_url}/{record_id}"
+    record = {"type": rtype, "name": domain, "content": ip, "ttl": 60}
+    r = requests.put(update_url, headers=headers, json=record)
+    if r.status_code == 200:
+        print(f"[Cloudflare] 更新成功：{domain} -> {ip}")
+    else:
+        print(f"[Cloudflare] 更新失败：{r.text}")
 
+def listener(port, domain, rtype, token, zone_id):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', port))
+    s.listen(5)
+    print(f"[监听] 端口 {port} 对应域名 {domain}")
     while True:
-        try:
-            conn, _ = sock.accept()
-            data = conn.recv(1024).decode().strip()
-            conn.close()
-            if data:
-                logging.info(f"接收到 {port} 上的 IP: {data}")
-                update_cf(domain, data, rtype)
-        except Exception as e:
-            logging.warning(f"端口 {port} 异常: {e}")
+        conn, addr = s.accept()
+        ip = conn.recv(1024).decode().strip()
+        print(f"[接收] {port} -> {ip}")
+        update_dns(domain, ip, rtype, token, zone_id)
+        conn.close()
 
+def start_all():
+    token, zone_id = load_secrets()
+    config = load_config()
+    for port, domain, rtype in config:
+        threading.Thread(target=listener, args=(port, domain, rtype, token, zone_id), daemon=True).start()
 
-if __name__ == '__main__':
-    load_config()
-    for port, info in domain_map.items():
-        t = threading.Thread(target=listen_on_port, args=(port, info['domain'], info['type']))
-        t.daemon = True
-        t.start()
+def on_exit(icon, item):
+    icon.stop()
+    os._exit(0)
 
-    logging.info("所有端口已开始监听，程序常驻运行中...")
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        logging.info("程序被中断退出")
+def on_hide(icon, item):
+    import ctypes
+    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+
+def tray():
+    image = Image.open("cloudflare_icon.ico")
+    menu = Menu(MenuItem("隐藏控制台", on_hide), MenuItem("退出", on_exit))
+    Icon("cf_ddns", image, "CF DDNS", menu).run()
+
+if __name__ == "__main__":
+    start_all()
+    threading.Thread(target=tray, daemon=True).start()
+    while True:
+        time.sleep(1)
