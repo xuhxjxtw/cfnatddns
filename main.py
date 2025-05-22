@@ -11,6 +11,20 @@ from PIL import Image
 
 CONFIG_FILE = 'config.json'
 
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        # 防止回环地址，确保是局域网地址
+        if ip.startswith("127.") or ip == "0.0.0.0":
+            raise Exception("Loopback or invalid IP")
+        return ip
+    except:
+        # 找不到局域网IP时，退出程序或提示错误
+        return None
+
 class App:
     def __init__(self, root, config):
         self.root = root
@@ -34,12 +48,20 @@ class App:
         for name, conf in nodes.items():
             port = conf.get("listen_port")
             threading.Thread(target=self.listen, args=(name, port, conf), daemon=True).start()
-            self.log(f"[{name}] 监听中: 127.0.0.1:{port}")
 
     def listen(self, name, port, conf):
+        host_ip = get_local_ip()
+        if not host_ip:
+            self.log(f"[{name}] 未能获取有效局域网 IP，监听失败")
+            return
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", port))
+        try:
+            s.bind((host_ip, port))
+        except Exception as e:
+            self.log(f"[{name}] 绑定失败 {host_ip}:{port} 错误: {e}")
+            return
         s.listen(5)
+        self.log(f"[{name}] 正在监听: {host_ip}:{port}")
         while True:
             conn, addr = s.accept()
             conn.close()
@@ -70,7 +92,6 @@ class App:
         record_name = conf["cloudflare"]["record_name"]
 
         try:
-            # 获取 record_id
             res = requests.get(f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records", headers=headers)
             recs = res.json().get("result", [])
             record_id = next((r["id"] for r in recs if r["name"] == record_name), None)
@@ -78,7 +99,6 @@ class App:
                 self.log(f"[{name}] 找不到 DNS 记录: {record_name}")
                 return
 
-            # 更新
             res = requests.put(
                 f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}",
                 headers=headers,
