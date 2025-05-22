@@ -231,8 +231,8 @@ class App:
             self.log_to_gui(f"[{name}] Cloudflare 配置不完整。")
             return
 
-        # 获取公网 IP (直接从公共服务获取，不再尝试内网服务)
-        ip = self.get_public_ip_from_public_service(conf)
+        # 获取公网 IP (优先从 cfnat 提供的内网服务获取，失败则回退到公共服务)
+        ip = self.get_public_ip(conf)
         if not ip:
             logging.error(f"[{name}] 获取公网 IP 失败，无法更新 DNS。")
             self.log_to_gui(f"[{name}] 获取公网 IP 失败")
@@ -338,45 +338,88 @@ class App:
             logging.error(f"[{name}] 更新 Cloudflare DNS 记录时发生未预期异常: {e}", exc_info=True)
             self.log_to_gui(f"[{name}] 更新异常: {e}")
 
-    def get_public_ip_from_public_service(self, conf):
+    def get_public_ip(self, conf):
         """
-        只从公共 IP 查询接口获取公网 IP 地址。
+        尝试从 cfnat 提供的内网 HTTP 接口获取公网 IP 地址。
+        如果内网接口未配置或获取失败，则回退到公共 IP 查询接口。
         """
         ip4 = None
         ip6 = None
+        cf_conf = conf["cloudflare"] # 获取 cloudflare 配置，以便读取新的 URL 字段
         
-        if conf["cloudflare"].get("enable_ipv4", True):
-            try:
-                # 备用公网 IP 获取接口 (IPv4)
-                ip4_candidate = requests.get("https://4.ipw.cn", timeout=5).text.strip()
-                if self._is_valid_ipv4(ip4_candidate):
-                    ip4 = ip4_candidate
-                    logging.info(f"通过公网接口获取 IPv4 成功: {ip4}")
-                else:
-                    logging.warning(f"公网接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
-            except Exception as e:
-                logging.error(f"IPv4 公网接口获取失败: {e}")
+        # 优先尝试从 cfnat_ip_source_url_ipv4 获取 IPv4
+        cfnat_ipv4_url = cf_conf.get("cfnat_ip_source_url_ipv4")
+        if cf_conf.get("enable_ipv4", True):
+            if cfnat_ipv4_url:
+                try:
+                    logging.info(f"尝试从 cfnat 内网服务获取 IPv4: {cfnat_ipv4_url}")
+                    resp = requests.get(cfnat_ipv4_url, timeout=3)
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip4_candidate = resp.text.strip()
+                        if self._is_valid_ipv4(ip4_candidate):
+                            ip4 = ip4_candidate
+                            logging.info(f"通过 cfnat 内网服务获取 IPv4 成功: {ip4}")
+                        else:
+                            logging.warning(f"cfnat 内网服务返回的 IPv4 格式不正确: '{ip4_candidate}'")
+                            raise Exception("cfnat 内网服务返回格式不正确")
+                    else:
+                        logging.warning(f"cfnat 内网服务 IPv4 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                        raise Exception("cfnat 内网服务返回异常")
+                except Exception as e:
+                    logging.warning(f"从 cfnat 内网获取 IPv4 失败，尝试公网接口: {e}")
+            else:
+                logging.info("cfnat_ip_source_url_ipv4 未配置，直接尝试公网接口获取 IPv4。")
 
-        if conf["cloudflare"].get("enable_ipv6", False):
-            try:
-                # 备用公网 IP 获取接口 (IPv6)
-                ip6_candidate = requests.get("https://6.ipw.cn", timeout=5).text.strip()
-                if self._is_valid_ipv6(ip6_candidate):
-                    ip6 = ip6_candidate
-                    logging.info(f"通过公网接口获取 IPv6 成功: {ip6}")
-                else:
-                    logging.warning(f"公网接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
-            except Exception as e:
-                logging.error(f"IPv6 公网接口获取失败: {e}")
+            # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv4
+            if not ip4:
+                try:
+                    ip4_candidate = requests.get("https://4.ipw.cn", timeout=5).text.strip()
+                    if self._is_valid_ipv4(ip4_candidate):
+                        ip4 = ip4_candidate
+                        logging.info(f"通过公网接口获取 IPv4 成功: {ip4}")
+                    else:
+                        logging.warning(f"公网接口返回的 IPv4 格式不正确: '{ip4_candidate}'")
+                except Exception as e:
+                    logging.error(f"IPv4 公网接口获取失败: {e}")
+
+        # 优先尝试从 cfnat_ip_source_url_ipv6 获取 IPv6
+        cfnat_ipv6_url = cf_conf.get("cfnat_ip_source_url_ipv6")
+        if cf_conf.get("enable_ipv6", False):
+            if cfnat_ipv6_url:
+                try:
+                    logging.info(f"尝试从 cfnat 内网服务获取 IPv6: {cfnat_ipv6_url}")
+                    resp = requests.get(cfnat_ipv6_url, timeout=3)
+                    if resp.status_code == 200 and resp.text.strip():
+                        ip6_candidate = resp.text.strip()
+                        if self._is_valid_ipv6(ip6_candidate):
+                            ip6 = ip6_candidate
+                            logging.info(f"通过 cfnat 内网服务获取 IPv6 成功: {ip6}")
+                        else:
+                            logging.warning(f"cfnat 内网服务返回的 IPv6 格式不正确: '{ip6_candidate}'")
+                            raise Exception("cfnat 内网服务返回格式不正确")
+                    else:
+                        logging.warning(f"cfnat 内网服务 IPv6 响应状态码非200或无内容: {resp.status_code}, {resp.text}")
+                        raise Exception("cfnat 内网服务返回异常")
+                except Exception as e:
+                    logging.warning(f"从 cfnat 内网获取 IPv6 失败，尝试公网接口: {e}")
+            else:
+                logging.info("cfnat_ip_source_url_ipv6 未配置，直接尝试公网接口获取 IPv6。")
+
+            # 如果从 cfnat 获取失败或未配置，则尝试公网接口获取 IPv6
+            if not ip6:
+                try:
+                    ip6_candidate = requests.get("https://6.ipw.cn", timeout=5).text.strip()
+                    if self._is_valid_ipv6(ip6_candidate):
+                        ip6 = ip6_candidate
+                        logging.info(f"通过公网接口获取 IPv6 成功: {ip6}")
+                    else:
+                        logging.warning(f"公网接口返回的 IPv6 格式不正确: '{ip6_candidate}'")
+                except Exception as e:
+                    logging.error(f"IPv6 公网接口获取失败: {e}")
 
         if ip4:
             return ip4
         if ip6:
-            # 如果同时启用了 IPv4 和 IPv6，并且两者都成功获取，
-            # 这里的逻辑是优先返回 IPv4 (如果 ip4 存在)。
-            # 如果 ip4 不存在但 ip6 存在，则返回 ip6。
-            # Cloudflare DDNS通常会针对 A 记录 (IPv4) 和 AAAA 记录 (IPv6) 分别更新。
-            # 这里的 get_public_ip 只返回一个 IP，意味着您可能需要为 IPv4 和 IPv6 分别调用 update_cf。
             return ip6 
         
         logging.error("未能获取任何有效的公网 IP 地址。")
