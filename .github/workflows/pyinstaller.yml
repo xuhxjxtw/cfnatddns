@@ -20,17 +20,19 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller pystray pillow requests
+          # 移除 pystray 和 pillow，因为不再需要托盘图标
+          pip install pyinstaller requests
 
       - name: Build executable
         run: |
-          # 关键修改在这里：将所有 pyinstaller 参数放在一行
-          pyinstaller main.py --onefile --noconsole --icon=icon.ico --hidden-import=tkinter.scrolledtext --hidden-import=PIL --collect-all pystray --additional-hooks-dir=hooks
+          # 移除 --icon 参数，移除所有与 PIL/pystray 相关的 hidden-import 和 collect-all
+          pyinstaller main.py --onefile --noconsole --hidden-import=tkinter.scrolledtext
 
           mkdir dist_bundle
           copy dist\\main.exe dist_bundle\\cf_updater.exe
           copy config.json dist_bundle\\
-          copy icon.ico dist_bundle\\
+          # 移除复制 icon.ico 的行
+          # copy icon.ico dist_bundle\\
 
       - name: Zip output
         run: powershell Compress-Archive -Path dist_bundle\\* -DestinationPath cf_updater.zip
