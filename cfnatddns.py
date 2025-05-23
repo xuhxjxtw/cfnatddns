@@ -41,14 +41,8 @@ def setup_logging(log_file_name, log_level_str):
 
 logger = setup_logging(LOG_FILE_NAME, LOG_LEVEL)
 
-def get_local_ip():
-    """ 获取本机的内网 IP 地址 """
-    hostname = socket.gethostname()  # 获取主机名
-    local_ip = socket.gethostbyname(hostname)  # 获取内网 IP 地址
-    return local_ip
-
-def get_server_ip(host, port=1234):
-    logger.info(f"开始与本机 IP {host}:{port} 建立 TLS 连接并获取 IP 地址...")
+def get_server_ip(host, port=443):
+    logger.info(f"开始与 {host}:{port} 建立 TLS 连接并获取 IP 地址...")
     context = ssl.create_default_context()
 
     try:
@@ -59,13 +53,15 @@ def get_server_ip(host, port=1234):
                 server_ip = ssock.getpeername()[0]
                 logger.info(f"成功与 {host} 建立 TLS 连接，目标服务器 IP 地址是: {server_ip}")
                 return server_ip
+    except ssl.SSLError as e:
+        logger.error(f"SSL 握手失败: {e}")
+        return None
     except Exception as e:
-        logger.error(f"与服务器 {host} 建立 TLS 连接时发生错误: {e}")
+        logger.error(f"与服务器 {host} 建立连接时发生错误: {e}")
         return None
 
-# 获取本机的内网 IP 地址
-local_ip = get_local_ip()
-logger.info(f"本机内网 IP 地址: {local_ip}")
+# 目标网站
+server_host = 'cloudflaremirrors.com'
 
-# 与本机的 TLS 连接
-get_server_ip(local_ip)
+# 获取目标服务器的 IP 地址
+get_server_ip(server_host)
