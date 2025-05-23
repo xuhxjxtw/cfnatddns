@@ -1,3 +1,8 @@
-{
-  "check_interval": 60
+default_config = {
+    "cfnat_listen_addr": "0.0.0.0",
+    "cfnat_listen_port": 1234,  # <--- 这里已修改
+    "min_valid_ips": 10,
+    "latency_threshold_ms": 300,
+    "log_file_name": "ip.ddns.txt",
+    "cfnat_exe_relative_path": "cfnat_winGUI-LAX/cfnat-windows-amd64.exe"
 }
