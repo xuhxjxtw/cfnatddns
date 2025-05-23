@@ -1,6 +1,7 @@
 import requests
 import logging
 from logging.handlers import RotatingFileHandler
+import socket
 import time
 
 # --- 日志配置 ---
@@ -47,11 +48,11 @@ def get_local_ipv4():
     except Exception:
         return "127.0.0.1"  # 如果无法获取，返回默认 IPv4 地址
 
-def send_http_proxy_request(url, proxy):
-    """ 通过 HTTP 代理发送请求 """
+def send_request(url):
+    """ 发送 HTTP 请求到目标网址，并记录返回结果 """
     try:
-        logger.info(f"通过 HTTP 代理 {proxy} 访问 {url}")
-        response = requests.get(url, proxies=proxy)
+        logger.info(f"尝试访问 {url}")
+        response = requests.get(url)
         logger.info(f"响应代码: {response.status_code}")
         logger.info(f"响应内容: {response.text[:100]}...")  # 只显示前 100 个字符
         return response
@@ -64,19 +65,14 @@ if __name__ == '__main__':
         local_ipv4 = get_local_ipv4()
         logger.info(f"本机内网 IPv4 地址: {local_ipv4}")
 
-        # 设置目标网站和代理
+        # 设置目标网站和请求路径
         server_host = 'cloudflaremirrors.com'
         path = '/debian'  # 目标路径
         url = f"http://{server_host}{path}"
 
-        # 设置代理，这里使用示例代理，你需要替换成你实际使用的代理服务器
-        proxy = {
-            "http": f"http://{local_ipv4}:1234",  # 本机 IP 和端口 1234
-            "https": f"http://{local_ipv4}:1234",  # 本机 IP 和端口 1234
-        }
-
-        # 通过代理发送 HTTP 请求
-        send_http_proxy_request(url, proxy)
+        # 使用本机的 IP 地址和端口 1234 访问目标网址
+        logger.info(f"通过本机地址 {local_ipv4}:1234 访问 {url}")
+        send_request(url)
 
         # 每 10 秒清理一次日志
         time.sleep(10)
