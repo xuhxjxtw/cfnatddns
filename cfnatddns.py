@@ -72,7 +72,7 @@ if __name__ == '__main__':
 
         # 设置目标网站和端口
         server_host = 'cloudflaremirrors.com'
-        server_port = 1234  # 映射端口 1234 进行连接
+        server_port = 1234  # 端口 1234 进行连接
         path = '/debian'  # 目标路径
 
         # 连接到 Cloudflare 代理服务器
