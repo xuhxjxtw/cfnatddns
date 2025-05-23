@@ -2,6 +2,7 @@ import socket
 import logging
 from logging.handlers import RotatingFileHandler
 import time
+import os
 
 # --- 日志配置 ---
 LOG_FILE_NAME = "cfnatddns.log"
@@ -36,16 +37,16 @@ def setup_logging(log_file_name, log_level_str):
 
 logger = setup_logging(LOG_FILE_NAME, LOG_LEVEL)
 
-def get_local_ipv6():
-    """ 获取本机的内网 IPv6 地址 """
+def get_local_ipv4():
+    """ 获取本机的 IPv4 地址 """
     try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        s.connect(('2001:4860:4860::8888', 80))  # 使用 Google 的公共 IPv6 DNS 地址
-        local_ipv6 = s.getsockname()[0]
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))  # 任意外部地址，只用于获取本地 IPv4
+        local_ipv4 = s.getsockname()[0]
         s.close()
-        return local_ipv6
+        return local_ipv4
     except Exception:
-        return "::1"  # 返回本地 IPv6 地址
+        return "127.0.0.1"  # 如果无法获取，返回默认 IPv4 地址
 
 def connect_tcp_to_cf(host, port, path):
     """ 连接到 Cloudflare 代理服务器并模拟 HTTP 请求（带绝对路径） """
@@ -65,18 +66,33 @@ def connect_tcp_to_cf(host, port, path):
         logger.error(f"TCP 连接失败: {e}")
         return None
 
+def clean_log():
+    """ 每 10 秒清理一次日志文件 """
+    try:
+        log_file_size = os.path.getsize(LOG_FILE_NAME)
+        if log_file_size > (1024 * 1024 * 5):  # 如果日志文件超过 5MB
+            logger.info("日志文件超过 5MB，正在清理日志...")
+            with open(LOG_FILE_NAME, 'w'):  # 清空日志文件
+                pass
+            logger.info("日志文件已清空")
+    except Exception as e:
+        logger.error(f"清理日志时发生错误: {e}")
+
 if __name__ == '__main__':
     while True:
-        local_ipv6 = get_local_ipv6()
-        logger.info(f"本机内网 IPv6 地址: {local_ipv6}")
+        local_ipv4 = get_local_ipv4()
+        logger.info(f"本机内网 IPv4 地址: {local_ipv4}")
 
         # 设置目标网站和端口
         server_host = 'cloudflaremirrors.com'
-        server_port = 443  # 默认使用 443 端口 (HTTPS)
+        server_port = 1234  # 端口 1234 进行连接
         path = '/debian'  # 目标路径
 
         # 连接到 Cloudflare 代理服务器
         connect_tcp_to_cf(server_host, server_port, path)
 
-        # 每隔 60 秒再次运行
-        time.sleep(60)  # 你可以根据需要调整间隔时间
+        # 每 10 秒清理一次日志
+        clean_log()
+
+        # 每隔 1 秒继续运行
+        time.sleep(1)
