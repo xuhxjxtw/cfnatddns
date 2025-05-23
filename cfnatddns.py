@@ -2,7 +2,6 @@ import socket
 import logging
 from logging.handlers import RotatingFileHandler
 import time
-import os
 
 # --- 日志配置 ---
 LOG_FILE_NAME = "cfnatddns.log"
@@ -66,18 +65,6 @@ def connect_tcp_to_cf(host, port, path):
         logger.error(f"TCP 连接失败: {e}")
         return None
 
-def clean_log():
-    """ 每 10 秒清理一次日志文件 """
-    try:
-        log_file_size = os.path.getsize(LOG_FILE_NAME)
-        if log_file_size > (1024 * 1024 * 5):  # 如果日志文件超过 5MB
-            logger.info("日志文件超过 5MB，正在清理日志...")
-            with open(LOG_FILE_NAME, 'w'):  # 清空日志文件
-                pass
-            logger.info("日志文件已清空")
-    except Exception as e:
-        logger.error(f"清理日志时发生错误: {e}")
-
 if __name__ == '__main__':
     while True:
         local_ipv4 = get_local_ipv4()
@@ -85,14 +72,11 @@ if __name__ == '__main__':
 
         # 设置目标网站和端口
         server_host = 'cloudflaremirrors.com'
-        server_port = 1234  # 端口 1234 进行连接
+        server_port = 1234  # 映射端口 1234 进行连接
         path = '/debian'  # 目标路径
 
         # 连接到 Cloudflare 代理服务器
         connect_tcp_to_cf(server_host, server_port, path)
 
         # 每 10 秒清理一次日志
-        clean_log()
-
-        # 每隔 1 秒继续运行
-        time.sleep(1)
+        time.sleep(10)
