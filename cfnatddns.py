@@ -4,10 +4,10 @@ import time
 import os
 import sys
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 
 # --- 获取脚本或打包后的exe所在的目录 ---
-# 获取脚本所在目录
 base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
 # 自动扫描并构建路径
@@ -51,6 +51,10 @@ logger = setup_logging(LOG_FILE_NAME, LOG_LEVEL)
 main_program_process = None
 stop_event = threading.Event()
 
+# 正则表达式，用于从输出中提取 IP 地址和延迟
+ip_pattern = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+delay_pattern = re.compile(r'延迟[:：]\s*(\d+)\s*ms')
+
 def enqueue_output(out_stream):
     logger.debug("开始读取主程序进程输出线程...")
     while not stop_event.is_set():
@@ -72,6 +76,18 @@ def enqueue_output(out_stream):
 
             if decoded_line:
                 logger.debug(f"[Program raw output] {decoded_line}")
+                # 提取延迟信息
+                delay_match = delay_pattern.search(decoded_line)
+                if delay_match:
+                    delay = delay_match.group(1)
+                    logger.info(f"检测到延迟: {delay} ms")
+                
+                # 提取 IP 地址
+                ips = ip_pattern.findall(decoded_line)
+                if ips:
+                    for ip in ips:
+                        logger.info(f"扫描到的 IP 地址: {ip}")
+
         except ValueError as e:
             if not stop_event.is_set():
                 logger.error(f"读取程序输出管道时发生错误: {e}")
