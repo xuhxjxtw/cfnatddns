@@ -69,11 +69,12 @@ def load_config():
     """
     default_config = {
         "cfnat_listen_addr": "0.0.0.0",
-        "cfnat_listen_port": 1234,
+        "cfnat_listen_port": 1234, # 默认端口为 1234
         "min_valid_ips": 10,
         "latency_threshold_ms": 300,
         "log_file_name": DEFAULT_LOG_FILE_NAME, # 默认日志文件名
         "log_level": DEFAULT_LOG_LEVEL,         # 默认日志级别
+        # 默认使用通配符模式来查找 cfnat exe，匹配 'cmd_tray-*.exe'
         "cfnat_exe_relative_path_pattern": "cfnat_winGUI-LAX/cmd_tray-*.exe"
     }
 
