@@ -1,299 +1,320 @@
-import subprocess
-import re
-import sys
+import socket
 import threading
-import queue
-import os
 import time
 import json
-import requests
-import win32process # 导入 win32process 模块，需要安装 pywin32
+import select
+import http.client # For HTTP proxy responses
+import dns.resolver # Need to install: pip install dnspython
 
-# --- 配置部分 ---
-# 获取当前脚本（或打包后的exe）所在的目录
-current_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+# --- Configuration ---
+CONFIG_FILE = "config.json" # External configuration file name
 
-# 定义 cfnat 主程序的匹配模式 (通配符)
-cfnat_program_pattern = re.compile(r"^cmd_tray-.*\.exe$", re.IGNORECASE)
+# Local proxy bind IP (usually 127.0.0.1 or 0.0.0.0)
+LOCAL_PROXY_BIND_IP = "127.0.0.1"
 
-# 配置文件名称和路径
-config_file_name = "config.json"
-config_file_path = os.path.join(current_dir, config_file_name)
+# Common HTTPS port for Cloudflare CDN
+CLOUDFLARE_CDN_PORT = 443
 
-# 在 config.json 中，你希望使用哪个节点的 Cloudflare 配置来更新 DNS。
-TARGET_CLOUDFLARE_NODE_KEY = "lax" 
+# DNS resolution timeout
+DNS_TIMEOUT = 5 # seconds
 
-# --- 全局变量 ---
-ip_queue = queue.Queue()
-unique_ips = set()
-best_ip_found = None 
-app_config = {}
-cfnat_actual_program_path = None 
+# --- Global variables and locks ---
+# Stores DNS resolution results for each node
+_node_dns_ips = {} # { "node_name": {"ipv4": "...", "ipv6": "..."}, ... }
+_dns_lock = threading.Lock() # Thread-safe lock
 
-# --- 函数：加载配置文件 ---
-def load_config():
-    global app_config
-    if not os.path.exists(config_file_path):
-        print(f"错误: 配置文件 '{config_file_name}' 未找到于 '{current_dir}'。")
-        print("请确保 config.json 与 cfnatddns.exe 在同一目录下。")
-        input("按任意键退出...")
-        sys.exit(1)
-
+# --- Helper function: DNS Query ---
+def resolve_dns(hostname, record_type='A'):
+    """
+    Queries the specified hostname for A or AAAA records using dnspython.
+    """
     try:
-        with open(config_file_path, 'r', encoding='utf-8') as f:
-            app_config = json.load(f)
-        print(f"成功加载配置文件: {config_file_path}")
-        if TARGET_CLOUDFLARE_NODE_KEY not in app_config.get("nodes", {}):
-            print(f"错误: 配置文件中未找到目标节点 '{TARGET_CLOUDFLARE_NODE_KEY}' 的配置。")
-            input("按任意键退出...")
-            sys.exit(1)
-        if "cloudflare" not in app_config["nodes"][TARGET_CLOUDFLARE_NODE_KEY]:
-            print(f"错误: 目标节点 '{TARGET_CLOUDFLARE_NODE_KEY}' 中未找到 'cloudflare' 配置。")
-            input("按任意键退出...")
-            sys.exit(1)
-            
-    except json.JSONDecodeError as e:
-        print(f"错误: 解析配置文件 '{config_file_name}' 失败。请检查JSON格式: {e}")
-        input("按任意键退出...")
-        sys.exit(1)
+        resolver = dns.resolver.Resolver()
+        resolver.timeout = DNS_TIMEOUT
+        resolver.lifetime = DNS_TIMEOUT
+        answers = resolver.resolve(hostname, record_type)
+        ips = [str(rdata) for rdata in answers]
+        return ips
+    except dns.resolver.NXDOMAIN:
+        print(f"DNS query failed: {hostname} does not exist.")
+    except dns.resolver.Timeout:
+        print(f"DNS query timed out: {hostname}.")
     except Exception as e:
-        print(f"加载配置文件时发生未知错误: {e}")
-        input("按任意键退出...")
-        sys.exit(1)
+        print(f"DNS query for {hostname} encountered an error: {e}")
+    return []
 
-# --- 函数：更新 Cloudflare DNS 记录 ---
-def update_cloudflare_dns(ip_address, cloudflare_settings):
-    print(f"\n--- 正在尝试更新 Cloudflare DNS 记录 ---")
-    email = cloudflare_settings.get("email")
-    api_key = cloudflare_settings.get("api_key")
-    zone_id = cloudflare_settings.get("zone_id")
-    record_name = cloudflare_settings.get("record_name")
-    enable_ipv4 = cloudflare_settings.get("enable_ipv4", False)
-    enable_ipv6 = cloudflare_settings.get("enable_ipv6", False)
+def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
+    """
+    Queries and updates the best IP for the specified node.
+    """
+    global _node_dns_ips
+    current_ipv4 = None
+    current_ipv6 = None
 
-    if not all([email, api_key, zone_id, record_name]):
-        print("错误: Cloudflare 配置信息不完整。无法更新 DNS。")
-        return
-
-    is_ipv4 = re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_address)
-    is_ipv6 = re.match(r'^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^([0-9a-fA-F]{1,4}:){1,7}:[0-9a-fA-F]{0,4}$', ip_address)
-
-    record_type = None
-    if is_ipv4 and enable_ipv4:
-        record_type = "A"
-    elif is_ipv6 and enable_ipv6:
-        record_type = "AAAA"
-    else:
-        print(f"警告: IP地址 '{ip_address}' 类型与配置中启用的IPv4/IPv6不匹配，或未启用对应类型。跳过更新。")
-        return
-
-    print(f"准备更新 DNS 记录: 域名={record_name}, 类型={record_type}, 新IP={ip_address}")
-
-    headers = {
-        "X-Auth-Email": email,
-        "X-Auth-Key": api_key,
-        "Content-Type": "application/json"
-    }
-
-    list_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type={record_type}&name={record_name}"
-    try:
-        response = requests.get(list_url, headers=headers, timeout=10)
-        response.raise_for_status() 
-        data = response.json()
-
-        if data["success"] and data["result"]:
-            record_id = data["result"][0]["id"]
-            current_ip = data["result"][0]["content"]
-            print(f"找到现有记录: ID={record_id}, 当前IP={current_ip}")
-
-            if current_ip == ip_address:
-                print("当前IP与新IP相同，无需更新。")
-                return
+    if enable_ipv4:
+        ipv4_ips = resolve_dns(record_name, 'A')
+        if ipv4_ips:
+            current_ipv4 = ipv4_ips[0] # Usually take only the first one
+            # print(f"[{node_name}] DNS resolved IPv4: {current_ipv4}")
         else:
-            print(f"未找到现有记录 '{record_name}' ({record_type})。尝试创建新记录。")
-            record_id = None 
+            print(f"[{node_name}] Failed to resolve IPv4 address.")
 
-    except requests.exceptions.RequestException as e:
-        print(f"获取 DNS 记录失败: {e}")
-        return
-    except Exception as e:
-        print(f"处理获取 DNS 记录响应时发生错误: {e}")
-        return
+    if enable_ipv6:
+        ipv6_ips = resolve_dns(record_name, 'AAAA')
+        if ipv6_ips:
+            current_ipv6 = ipv6_ips[0] # Usually take only the first one
+            # print(f"[{node_name}] DNS resolved IPv6: {current_ipv6}")
+        else:
+            print(f"[{node_name}] Failed to resolve IPv6 address.")
 
-    payload = {
-        "type": record_type,
-        "name": record_name,
-        "content": ip_address,
-        "ttl": 1, 
-        "proxied": True 
-    }
+    with _dns_lock:
+        _node_dns_ips[node_name] = {"ipv4": current_ipv4, "ipv6": current_ipv6}
 
-    if record_id:
-        update_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}"
+# --- DNSUpdateMonitor Class: Periodically updates DNS resolution results ---
+class DNSUpdateMonitor:
+    def __init__(self, nodes_config):
+        self.nodes_config = nodes_config
+        self.is_running = False
+        self.monitor_thread = None
+
+    def start(self):
+        self.is_running = True
+        self.monitor_thread = threading.Thread(target=self._run_monitor)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+        print("DNS update monitor started.")
+
+    def _run_monitor(self):
+        # Initial update for all nodes immediately
+        for node_name, node_info in self.nodes_config.items():
+            cf_config = node_info.get("cloudflare", {})
+            record_name = cf_config.get("record_name")
+            enable_ipv4 = cf_config.get("enable_ipv4", True)
+            enable_ipv6 = cf_config.get("enable_ipv6", True)
+            if record_name:
+                update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6)
+
+        # Subsequent updates at regular intervals
+        while self.is_running:
+            time.sleep(30) # e.g., update DNS resolution every 30 seconds
+            print("Refreshing DNS resolution results...")
+            for node_name, node_info in self.nodes_config.items():
+                cf_config = node_info.get("cloudflare", {})
+                record_name = cf_config.get("record_name")
+                enable_ipv4 = cf_config.get("enable_ipv4", True)
+                enable_ipv6 = cf_config.get("enable_ipv6", True)
+                if record_name:
+                    update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6)
+
+    def stop(self):
+        self.is_running = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
+        print("DNS update monitor stopped.")
+
+    def get_node_ip(self, node_name, prefer_ipv6=False):
+        """Gets the current best IP for the specified node."""
+        with _dns_lock:
+            node_data = _node_dns_ips.get(node_name, {})
+            if prefer_ipv6 and node_data.get("ipv6"):
+                return node_data["ipv6"]
+            elif node_data.get("ipv4"):
+                return node_data["ipv4"]
+            return None # No available IP
+
+# --- NodeProxyServer Class: Creates a proxy for each node ---
+class NodeProxyServer:
+    def __init__(self, node_name, listen_ip, listen_port, dns_monitor):
+        self.node_name = node_name
+        self.listen_ip = listen_ip
+        self.listen_port = listen_port
+        self.dns_monitor = dns_monitor
+        self.server_socket = None
+        self.is_running = False
+        self.server_thread = None
+
+    def start(self):
         try:
-            response = requests.put(update_url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            if data["success"]:
-                print(f"DNS 记录 '{record_name}' 更新成功！新IP: {ip_address}")
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind((self.listen_ip, self.listen_port))
+            self.server_socket.listen(5)
+            self.is_running = True
+            print(f"[{self.node_name}] Proxy server started, listening on {self.listen_ip}:{self.listen_port}")
+
+            self.server_thread = threading.Thread(target=self._accept_connections)
+            self.server_thread.daemon = True
+            self.server_thread.start()
+            return True
+        except Exception as e:
+            print(f"[{self.node_name}] Failed to start proxy server: {e}")
+            return False
+
+    def _accept_connections(self):
+        while self.is_running:
+            try:
+                rlist, _, _ = select.select([self.server_socket], [], [], 1)
+                if self.server_socket in rlist:
+                    client_socket, client_addr = self.server_socket.accept()
+                    # print(f"[{self.node_name}] Received connection request from {client_addr}.")
+                    client_thread = threading.Thread(
+                        target=self._handle_client,
+                        args=(client_socket, client_addr)
+                    )
+                    client_thread.daemon = True
+                    client_thread.start()
+            except Exception as e:
+                if self.is_running:
+                    print(f"[{self.node_name}] Error accepting connection: {e}")
+                break
+
+    def _handle_client(self, client_socket, client_addr):
+        remote_socket = None
+        try:
+            # Receive full HTTP request headers
+            request_buffer = b""
+            while True:
+                chunk = client_socket.recv(4096)
+                if not chunk:
+                    raise ConnectionResetError("Client closed connection prematurely")
+                request_buffer += chunk
+                if b"\r\n\r\n" in request_buffer:
+                    break
+
+            first_line = request_buffer.split(b"\r\n")[0]
+            method, path, _ = first_line.split(b' ', 2)
+
+            if method == b'CONNECT':
+                # Get the best IP filtered by cfnat (via DNS query)
+                target_ip = self.dns_monitor.get_node_ip(self.node_name) # Can add prefer_ipv6 parameter
+                if not target_ip:
+                    print(f"[{self.node_name} - {client_addr}] Error: Best IP not available from DNS.")
+                    client_socket.sendall(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+                    client_socket.close()
+                    return
+
+                print(f"[{self.node_name} - {client_addr}] Attempting to connect via DNS best IP ({target_ip}:{CLOUDFLARE_CDN_PORT})...")
+
+                # Establish connection to the IP filtered by cfnat
+                remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                remote_socket.settimeout(5)
+                # Connect to the dynamically updated IP from cfnat and Cloudflare CDN port (443)
+                remote_socket.connect((target_ip, CLOUDFLARE_CDN_PORT))
+                remote_socket.settimeout(None)
+
+                client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                self._forward_data(client_socket, remote_socket)
             else:
-                print(f"DNS 记录更新失败: {data.get('errors', '未知错误')}")
-        except requests.exceptions.RequestException as e:
-            print(f"更新 DNS 记录失败: {e}")
+                print(f"[{self.node_name} - {client_addr}] Received non-CONNECT HTTP method ({method.decode()}). This method is not supported.")
+                client_socket.sendall(b"HTTP/1.1 501 Not Implemented\r\n\r\n")
+                client_socket.close()
+
+        except socket.timeout:
+            print(f"[{self.node_name} - {client_addr}] Connection to remote server timed out.")
+            client_socket.sendall(f"HTTP/1.1 {http.client.GATEWAY_TIMEOUT} Gateway Timeout\r\n\r\n".encode())
+        except ConnectionRefusedError:
+            print(f"[{self.node_name} - {client_addr}] Connection refused.")
+            client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
         except Exception as e:
-            print(f"处理更新 DNS 记录响应时发生错误: {e}")
-    else:
-        create_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records"
-        try:
-            response = requests.post(create_url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            if data["success"]:
-                print(f"DNS 记录 '{record_name}' 创建成功！IP: {ip_address}")
-            else:
-                print(f"DNS 记录创建失败: {data.get('errors', '未知错误')}")
-        except requests.exceptions.RequestException as e:
-            print(f"创建 DNS 记录失败: {e}")
-        except Exception as e:
-            print(f"处理创建 DNS 记录响应时发生错误: {e}")
+            print(f"[{self.node_name} - {client_addr}] Error handling client request: {e}")
+            if client_socket and not client_socket.closed:
+                try:
+                    client_socket.sendall(f"HTTP/1.1 {http.client.INTERNAL_SERVER_ERROR} Internal Server Error\r\n\r\n".encode())
+                except Exception as send_e:
+                    pass # print(f"Failed to send error response: {send_e}")
+        finally:
+            if client_socket and not client_socket.closed:
+                client_socket.close()
+            if 'remote_socket' in locals() and remote_socket and not remote_socket.closed:
+                remote_socket.close()
 
-# --- 线程函数：从子进程输出流中读取 ---
-def enqueue_output(out, q):
-    for line in iter(out.readline, b''): 
-        try:
-            q.put(line.decode('utf-8', errors='ignore').strip()) 
-        except Exception as e:
-            print(f"解码 cfnat 输出时发生错误: {e}")
-    out.close()
+    def _forward_data(self, sock1, sock2):
+        sockets = [sock1, sock2]
+        while True:
+            try:
+                rlist, _, _ = select.select(sockets, [], [], 1)
+                if not rlist:
+                    continue
 
-# --- 主逻辑：处理 cfnat 输出并提取IP ---
-def process_cfnat_output():
-    global best_ip_found 
-    global cfnat_actual_program_path 
+                for sock in rlist:
+                    data = sock.recv(4096)
+                    if not data:
+                        return
+                    if sock == sock1:
+                        sock2.sendall(data)
+                    else:
+                        sock1.sendall(data)
+            except Exception as e:
+                break
 
-    print("--- cfnatddns 启动中 ---")
-    print(f"当前目录: {current_dir}")
+    def stop(self):
+        self.is_running = False
+        if self.server_socket:
+            self.server_socket.close()
+            print(f"[{self.node_name}] Proxy server stopped.")
+        if self.server_thread:
+            self.server_thread.join(timeout=5)
 
-    # --- 步骤 1: 动态查找 cfnat 主程序 ---
-    found_programs = []
-    for filename in os.listdir(current_dir):
-        if os.path.isfile(os.path.join(current_dir, filename)) and cfnat_program_pattern.match(filename):
-            found_programs.append(filename)
-
-    if not found_programs:
-        print(f"错误: 在 '{current_dir}' 目录下未找到符合 'cmd_tray-*.exe' 模式的程序。")
-        print("请确保 cmd_tray-xxx.exe (例如 cmd_tray-HKG.exe) 与 cfnatddns.exe 在同一目录下。")
-        input("按任意键退出...")
-        return 
-
-    if len(found_programs) > 1:
-        print("警告: 找到多个符合 'cmd_tray-*.exe' 模式的程序:")
-        for p in found_programs:
-            print(f"- {p}")
-        print(f"将默认使用第一个找到的程序: {found_programs[0]}")
-        cfnat_actual_program_name = found_programs[0]
-    else:
-        cfnat_actual_program_name = found_programs[0]
-        print(f"找到主程序: {cfnat_actual_program_name}")
-
-    cfnat_actual_program_path = os.path.join(current_dir, cfnat_actual_program_name)
-    print(f"主程序完整路径: {cfnat_actual_program_path}")
-
-    # --- 步骤 2: 启动主程序并捕获其输出 ---
-    try:
-        proc = subprocess.Popen([cfnat_actual_program_path], 
-                                stdout=subprocess.PIPE,  
-                                stderr=subprocess.PIPE,  
-                                bufsize=1,               
-                                universal_newlines=False,
-                                # !!! 关键修改: 添加 creationflags !!!
-                                # This is the crucial modification: adding creationflags
-                                creationflags=win32process.CREATE_NEW_CONSOLE) 
-    except FileNotFoundError:
-        print(f"错误: 无法启动程序 '{cfnat_actual_program_path}'。请检查路径或权限。")
-        input("按任意键退出...")
-        return
-    except Exception as e:
-        print(f"启动主程序时发生未知错误: {e}")
-        input("按任意键退出...")
-        return
-
-    # --- 步骤 3: 使用线程实时读取输出 ---
-    stdout_thread = threading.Thread(target=enqueue_output, args=(proc.stdout, ip_queue))
-    stderr_thread = threading.Thread(target=enqueue_output, args=(proc.stderr, ip_queue))
-
-    stdout_thread.daemon = True 
-    stderr_thread.daemon = True
-
-    stdout_thread.start()
-    stderr_thread.start()
-
-    print("\n正在捕获主程序输出并提取IPs...")
-    print("-----------------------------------")
-
-    # --- 步骤 4: 主循环：从队列中获取输出并处理 ---
-    ipv4_pattern = r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
-    ipv6_pattern = r'\[([0-9a-fA-F:]+)\]:\d+' 
-    best_connection_pattern = r'选择 最佳 连接 : 地址 : \[(?P<ipv6>[0-9a-fA-F:]+)\]:\d+ 延迟 : (?P<latency>\d+) ms'
-
-    while True:
-        try:
-            line = ip_queue.get(timeout=0.5) 
-            print(f"[主程序] {line}") 
-
-            # 查找IPv4地址
-            ipv4_matches = re.findall(ipv4_pattern, line)
-            for ip in ipv4_matches:
-                if ip not in unique_ips:
-                    unique_ips.add(ip)
-                    print(f"新发现IPv4: {ip}")
-
-            # 查找IPv6地址
-            ipv6_matches = re.findall(ipv6_pattern, line)
-            for ip in ipv6_matches:
-                if ip not in unique_ips:
-                    unique_ips.add(ip)
-                    print(f"新发现IPv6: {ip}")
-            
-            # 尝试匹配“选择最佳连接”行来获取最佳IP
-            best_match = re.search(best_connection_pattern, line)
-            if best_match:
-                best_ip_found = best_match.group('ipv6')
-                latency = best_match.group('latency')
-                print(f"主程序已选择最佳连接: {best_ip_found} (延迟: {latency} ms)")
-                
-                target_node_config = app_config["nodes"][TARGET_CLOUDFLARE_NODE_KEY]["cloudflare"]
-                update_cloudflare_dns(best_ip_found, target_node_config)
-                # 如果主程序运行一次就退出，那么通常DDNS更新后就可以让脚本退出了。
-                # 如果你想在更新后立即退出，可以取消注释下面这行：
-                # return 
-
-        except queue.Empty:
-            if proc.poll() is not None: 
-                print("\n主程序已结束，或无更多输出。")
-                break 
-
-        except Exception as e:
-            print(f"处理主程序输出时发生错误: {e}")
-
-    # --- 步骤 5: 等待子进程完全结束 ---
-    proc.wait() 
-
-    print("\n--- 任务完成 ---")
-    print("所有提取到的唯一IP地址：")
-    if unique_ips:
-        for ip in sorted(list(unique_ips)):
-            print(ip)
-    else:
-        print("未从主程序输出中提取到任何IP地址。")
-    
-    if best_ip_found:
-        print(f"\n主程序最终选择的最佳连接IP: {best_ip_found}")
-    else:
-        print("\n未从主程序输出中找到明确的最佳连接IP。")
-
-# --- 主程序入口点 ---
+# --- Main program logic ---
 if __name__ == "__main__":
-    load_config() 
-    process_cfnat_output()
-    input("\n按 Enter 键退出...") 
+    # 1. Read configuration file
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        nodes_config = config.get("nodes", {})
+        if not nodes_config:
+            print(f"Error: 'nodes' configuration not found in {CONFIG_FILE}.")
+            exit()
+    except FileNotFoundError:
+        print(f"Error: Configuration file {CONFIG_FILE} not found. Please ensure the file exists.")
+        exit()
+    except json.JSONDecodeError:
+        print(f"Error: {CONFIG_FILE} has invalid JSON format.")
+        exit()
+    except Exception as e:
+        print(f"An unknown error occurred while reading the configuration file: {e}")
+        exit()
+
+    # 2. Start DNS update monitor
+    dns_monitor = DNSUpdateMonitor(nodes_config)
+    dns_monitor.start()
+
+    # 3. Start a proxy server for each node
+    proxy_servers = []
+    for node_name, node_info in nodes_config.items():
+        listen_port = node_info.get("listen_port")
+        if not listen_port:
+            print(f"Node '{node_name}' does not have 'listen_port' configured, skipping.")
+            continue
+        
+        proxy_server = NodeProxyServer(node_name, LOCAL_PROXY_BIND_IP, listen_port, dns_monitor)
+        if proxy_server.start():
+            proxy_servers.append(proxy_server)
+        else:
+            print(f"Node '{node_name}' proxy server failed to start.")
+
+    if not proxy_servers:
+        print("No proxy servers started successfully, exiting.")
+        dns_monitor.stop()
+        exit()
+
+    print("\n--- Simulating v2ray with cfnat DNS dynamic IP running ---")
+    print("Please ensure the cfnat client is running and updating your Cloudflare DNS records.")
+    for ps in proxy_servers:
+        print(f"Node [{ps.node_name}]: HTTP proxy listening on {ps.listen_ip}:{ps.listen_port}")
+        print(f"Please set your browser/app proxy to HTTP proxy {ps.listen_ip}:{ps.listen_port}")
+    print(" (This proxy only supports HTTPS (CONNECT method) forwarding)")
+    print("Press Ctrl+C to exit.")
+
+    try:
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C detected. Stopping program...")
+    finally:
+        for ps in proxy_servers:
+            ps.stop()
+        dns_monitor.stop()
+        print("Program exited safely.")
+
