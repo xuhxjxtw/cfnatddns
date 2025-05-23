@@ -1,5 +1,3 @@
-# cfnatddns.py
-
 import subprocess
 import threading
 import time
@@ -8,15 +6,12 @@ import sys
 import logging
 from logging.handlers import RotatingFileHandler
 
-# --- 硬编码路径和日志设置 ---
-# 获取脚本或打包后的exe所在的目录
+# --- 获取脚本或打包后的exe所在的目录 ---
+# 获取脚本所在目录
 base_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 
-# 待启动的程序完整路径
-# 直接构建绝对路径，避免相对路径的歧义
-# 假设 cmd_tray-LAX.exe 就在 base_dir/cfnat_winGUI-LAX/ 目录下
-PROGRAM_TO_START_FULL_PATH = os.path.join(base_dir, "cfnat_winGUI-LAX", "cmd_tray-LAX.exe")
-
+# 自动扫描并构建路径
+PROGRAM_TO_START_FULL_PATH = os.path.join(base_dir, "cmd_tray-LAX.exe")
 
 # 日志文件名
 LOG_FILE_NAME = "cfnatddns.log"
