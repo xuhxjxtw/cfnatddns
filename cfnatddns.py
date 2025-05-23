@@ -11,9 +11,9 @@ from logging.handlers import RotatingFileHandler
 
 # --- Configuration ---
 CONFIG_FILE = "config.json"
-LOCAL_PROXY_BIND_IP = "127.0.0.1"
-CLOUDFLARE_CDN_PORT = 443
-DNS_TIMEOUT = 5 # seconds
+LOCAL_PROXY_BIND_IP = "127.0.0.1" # Local IP for proxy to listen on
+CLOUDFLARE_CDN_PORT = 443 # Common HTTPS port for Cloudflare CDN
+DNS_TIMEOUT = 5 # seconds for DNS resolution
 
 # --- Logging Setup ---
 LOG_DIR = "logs"
@@ -40,11 +40,14 @@ console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(
 logger.addHandler(console_handler)
 
 # --- Global variables and locks ---
-_node_dns_ips = {}
-_dns_lock = threading.Lock()
+_node_dns_ips = {} # Stores DNS resolution results for each node
+_dns_lock = threading.Lock() # Thread-safe lock
 
 # --- Helper function: DNS Query ---
 def resolve_dns(hostname, record_type='A'):
+    """
+    Queries the specified hostname for A or AAAA records using dnspython.
+    """
     try:
         resolver = dns.resolver.Resolver()
         resolver.timeout = DNS_TIMEOUT
@@ -61,6 +64,9 @@ def resolve_dns(hostname, record_type='A'):
     return []
 
 def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
+    """
+    Queries and updates the best IP for the specified node.
+    """
     global _node_dns_ips
     current_ipv4 = None
     current_ipv6 = None
@@ -69,17 +75,17 @@ def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
         ipv4_ips = resolve_dns(record_name, 'A')
         if ipv4_ips:
             current_ipv4 = ipv4_ips[0]
-            # logger.info(f"[{node_name}] DNS resolved IPv4: {current_ipv4}")
+            # logger.info(f"[{node_name}] DNS resolved IPv4: {current_ipv4}") # Too chatty for logs
         else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv4 address.")
+            logger.warning(f"[{node_name}] Failed to resolve IPv4 address for {record_name}.")
 
     if enable_ipv6:
         ipv6_ips = resolve_dns(record_name, 'AAAA')
         if ipv6_ips:
             current_ipv6 = ipv6_ips[0]
-            # logger.info(f"[{node_name}] DNS resolved IPv6: {current_ipv6}")
+            # logger.info(f"[{node_name}] DNS resolved IPv6: {current_ipv6}") # Too chatty for logs
         else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv6 address.")
+            logger.warning(f"[{node_name}] Failed to resolve IPv6 address for {record_name}.")
 
     with _dns_lock:
         _node_dns_ips[node_name] = {"ipv4": current_ipv4, "ipv6": current_ipv6}
@@ -99,6 +105,7 @@ class DNSUpdateMonitor:
         logger.info("DNS update monitor started.")
 
     def _run_monitor(self):
+        # Initial update for all nodes immediately
         for node_name, node_info in self.nodes_config.items():
             cf_config = node_info.get("cloudflare", {})
             record_name = cf_config.get("record_name")
@@ -107,8 +114,9 @@ class DNSUpdateMonitor:
             if record_name:
                 update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6)
 
+        # Subsequent updates at regular intervals
         while self.is_running:
-            time.sleep(30)
+            time.sleep(30) # e.g., update DNS resolution every 30 seconds
             logger.info("Refreshing DNS resolution results...")
             for node_name, node_info in self.nodes_config.items():
                 cf_config = node_info.get("cloudflare", {})
@@ -125,6 +133,7 @@ class DNSUpdateMonitor:
         logger.info("DNS update monitor stopped.")
 
     def get_node_ip(self, node_name, prefer_ipv6=False):
+        """Gets the current best IP for the specified node."""
         with _dns_lock:
             node_data = _node_dns_ips.get(node_name, {})
             if prefer_ipv6 and node_data.get("ipv6"):
@@ -157,8 +166,14 @@ class NodeProxyServer:
             self.server_thread.daemon = True
             self.server_thread.start()
             return True
+        except OSError as e: # Catch specific OSError for address in use
+            if e.errno == 10048: # Windows specific error for "Address already in use"
+                logger.critical(f"[{self.node_name}] Failed to start proxy server: Port {self.listen_port} is already in use. Please check if another program (e.g., cfnat) is using it, or change the listen_port in config.json.")
+            else:
+                logger.critical(f"[{self.node_name}] Failed to start proxy server (OSError): {e}")
+            return False
         except Exception as e:
-            logger.error(f"[{self.node_name}] Failed to start proxy server: {e}")
+            logger.critical(f"[{self.node_name}] Failed to start proxy server (General Error): {e}")
             return False
 
     def _accept_connections(self):
@@ -197,7 +212,7 @@ class NodeProxyServer:
             if method == b'CONNECT':
                 target_ip = self.dns_monitor.get_node_ip(self.node_name)
                 if not target_ip:
-                    logger.warning(f"[{self.node_name} - {client_addr}] Error: Best IP not available from DNS.")
+                    logger.warning(f"[{self.node_name} - {client_addr}] Error: Best IP not available from DNS for node '{self.node_name}'.")
                     client_socket.sendall(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
                     client_socket.close()
                     return
@@ -224,15 +239,15 @@ class NodeProxyServer:
             client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
         except Exception as e:
             logger.error(f"[{self.node_name} - {client_addr}] Error handling client request: {e}")
-            if client_socket and not client_socket.closed:
+            if client_socket:
                 try:
                     client_socket.sendall(f"HTTP/1.1 {http.client.INTERNAL_SERVER_ERROR} Internal Server Error\r\n\r\n".encode())
                 except Exception as send_e:
                     pass
         finally:
-            if client_socket and not client_socket.closed:
+            if client_socket:
                 client_socket.close()
-            if 'remote_socket' in locals() and remote_socket and not remote_socket.closed:
+            if 'remote_socket' in locals() and remote_socket:
                 remote_socket.close()
 
     def _forward_data(self, sock1, sock2):
@@ -296,13 +311,12 @@ if __name__ == "__main__":
             continue
         
         proxy_server = NodeProxyServer(node_name, LOCAL_PROXY_BIND_IP, listen_port, dns_monitor)
-        if proxy_server.start():
+        if proxy_server.start(): # This will now return False on port conflict
             proxy_servers.append(proxy_server)
-        else:
-            logger.error(f"Node '{node_name}' proxy server failed to start.")
+        # No else block here, as the error is logged inside proxy_server.start()
 
     if not proxy_servers:
-        logger.critical("No proxy servers started successfully, exiting.")
+        logger.critical("No proxy servers started successfully. Please check logs for errors (e.g., port conflicts). Exiting.")
         dns_monitor.stop()
         exit()
 
