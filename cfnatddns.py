@@ -12,12 +12,8 @@ from logging.handlers import RotatingFileHandler
 # --- Configuration ---
 CONFIG_FILE = "config.json"
 LOCAL_PROXY_BIND_IP = "127.0.0.1"
-# This is the port our Python proxy will listen on for browser/app connections.
-# This MUST NOT conflict with cfnat's listen_ports (e.g., 1234, 1235).
 LOCAL_PROXY_PORT = 8080 
 
-# Cloudflare CDN common HTTPS port (used by cfnat for its outbound)
-# This is here for context, but our Python script will connect to cfnat's local port.
 CLOUDFLARE_CDN_PORT = 443 
 DNS_TIMEOUT = 5 # seconds for DNS resolution
 
@@ -27,23 +23,26 @@ LOG_FILE = os.path.join(LOG_DIR, "cfnatddns.log")
 MAX_LOG_SIZE = 5 * 1024 * 1024 # 5 MB
 BACKUP_COUNT = 3 # Keep 3 backup log files
 
-# Ensure log directory exists
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
 # Configure logger
 logger = logging.getLogger('cfnatddns_logger')
-logger.setLevel(logging.INFO) # Set minimum logging level
+logger.setLevel(logging.INFO)
 
-# File handler for persistent logs
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding='utf-8')
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
-# Console handler for real-time output during development (will be hidden with --noconsole)
+# Always add a console handler first, so early errors can be seen even if file logging fails
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(console_handler)
+
+# Try to set up file handler for persistent logs
+try:
+    # Ensure log directory exists, exist_ok=True prevents error if it already exists
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR, exist_ok=True)
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
+    logger.info(f"File logging enabled to {LOG_FILE}")
+except Exception as e:
+    logger.error(f"Failed to set up file logging: {e}. Logging only to console.")
 
 # --- Global variables and locks ---
 _node_dns_ips = {} # Stores DNS resolution results for each node (for logging/monitoring)
@@ -62,7 +61,7 @@ def resolve_dns(hostname, record_type='A'):
         ips = [str(rdata) for rdata in answers]
         return ips
     except dns.resolver.NXDOMAIN:
-        logger.debug(f"DNS query failed: {hostname} does not exist for type {record_type}.") # Changed to debug
+        logger.debug(f"DNS query failed: {hostname} does not exist for type {record_type}.")
     except dns.resolver.Timeout:
         logger.warning(f"DNS query timed out: {hostname} for type {record_type}.")
     except Exception as e:
@@ -212,7 +211,6 @@ class MainProxyServer:
             while True:
                 chunk = client_socket.recv(4096)
                 if not chunk:
-                    # Client closed connection prematurely, or connection reset by peer
                     logger.warning(f"[{client_addr}] Client closed connection prematurely or connection reset during header receive.")
                     return
                 request_buffer += chunk
@@ -226,17 +224,14 @@ class MainProxyServer:
                 target_host_port = path.decode('utf-8')
                 logger.info(f"[{client_addr}] Received CONNECT request for {target_host_port}. Forwarding to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}...")
 
-                # Establish connection to cfnat's local listening port
                 remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 remote_socket.settimeout(5) # Set connection timeout to cfnat
                 remote_socket.connect((self.cfnat_target_ip, self.cfnat_target_port))
                 remote_socket.settimeout(None) # Remove timeout after connection
                 logger.info(f"[{client_addr}] Successfully connected to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}.")
 
-                # Reply to client that connection is established
                 client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
-                # Start forwarding data between client and cfnat
                 self._forward_data(client_socket, remote_socket)
             else:
                 logger.warning(f"[{client_addr}] Received non-CONNECT HTTP method ({method.decode()}). This proxy only supports HTTPS (CONNECT method).")
@@ -252,7 +247,7 @@ class MainProxyServer:
             if client_socket:
                 client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
         except Exception as e:
-            logger.error(f"[{client_addr}] Error handling client request: {e}", exc_info=True) # Log full traceback
+            logger.error(f"[{client_addr}] Error handling client request: {e}", exc_info=True)
             if client_socket:
                 try:
                     client_socket.sendall(f"HTTP/1.1 {http.client.INTERNAL_SERVER_ERROR} Internal Server Error\r\n\r\n".encode())
@@ -276,16 +271,16 @@ class MainProxyServer:
                     data = sock.recv(4096)
                     if not data:
                         logger.info(f"Connection closed by {sock.getpeername()}.")
-                        return # Connection closed
-                    if sock == sock1: # Data from client to cfnat
+                        return
+                    if sock == sock1:
                         sock2.sendall(data)
-                    else: # Data from cfnat to client
+                    else:
                         sock1.sendall(data)
             except ConnectionResetError:
                 logger.warning(f"Connection reset during data forwarding between {sock1.getpeername()} and {sock2.getpeername()}.")
                 return
             except Exception as e:
-                logger.error(f"Error during data forwarding: {e}", exc_info=True) # Log full traceback
+                logger.error(f"Error during data forwarding: {e}", exc_info=True)
                 return
 
     def stop(self):
@@ -298,27 +293,29 @@ class MainProxyServer:
 
 # --- Main program logic ---
 if __name__ == "__main__":
-    logger.info("Starting cfnatddns proxy application...")
+    # Log initial message before config loading
+    logger.info("Initializing cfnatddns proxy application...")
+
     # 1. Read configuration file
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config = json.load(f)
         nodes_config = config.get("nodes", {})
         if not nodes_config:
-            logger.error(f"Error: 'nodes' configuration not found in {CONFIG_FILE}.")
+            logger.critical(f"Error: 'nodes' configuration not found in {CONFIG_FILE}. Exiting.")
             exit()
+        logger.info(f"Configuration loaded from {CONFIG_FILE}.")
     except FileNotFoundError:
-        logger.error(f"Error: Configuration file {CONFIG_FILE} not found. Please ensure the file exists.")
+        logger.critical(f"Error: Configuration file {CONFIG_FILE} not found. Please ensure the file exists. Exiting.")
         exit()
-    except json.JSONDecodeError:
-        logger.error(f"Error: {CONFIG_FILE} has invalid JSON format.")
+    except json.JSONDecodeError as e:
+        logger.critical(f"Error: {CONFIG_FILE} has invalid JSON format: {e}. Exiting.")
         exit()
     except Exception as e:
-        logger.error(f"An unknown error occurred while reading the configuration file: {e}")
+        logger.critical(f"An unknown error occurred while reading the configuration file: {e}. Exiting.")
         exit()
 
     # Get the name and listen_port of the first node from config.json
-    # This will be the cfnat's local listening port that our proxy connects to.
     primary_node_name = next(iter(nodes_config), None)
     if not primary_node_name:
         logger.critical("No nodes configured in config.json. Exiting.")
@@ -328,6 +325,7 @@ if __name__ == "__main__":
     if not primary_cfnat_listen_port:
         logger.critical(f"Node '{primary_node_name}' does not have 'listen_port' configured. This port is needed for connecting to cfnat. Exiting.")
         exit()
+    logger.info(f"Using primary cfnat node '{primary_node_name}' with local listen port {primary_cfnat_listen_port} for forwarding.")
 
     # 2. Start DNS update monitor (still monitors all nodes, for logging/monitoring cfnat's DNS updates)
     dns_monitor = DNSUpdateMonitor(nodes_config)
@@ -335,7 +333,7 @@ if __name__ == "__main__":
 
     # 3. Start our main proxy server, forwarding to cfnat's local listener
     main_proxy_server = MainProxyServer(LOCAL_PROXY_BIND_IP, LOCAL_PROXY_PORT, 
-                                        LOCAL_PROXY_BIND_IP, primary_cfnat_listen_port) # cfnat is usually on localhost
+                                        LOCAL_PROXY_BIND_IP, primary_cfnat_listen_port)
     
     if not main_proxy_server.start():
         logger.critical("Main proxy server failed to start, exiting.")
@@ -355,7 +353,6 @@ if __name__ == "__main__":
     try:
         while True:
             # Periodically log the current DNS-resolved IP for the primary cfnat node
-            # This helps to see what IP cfnat *should* be using for outbound connections.
             current_ipv4, current_ipv6 = dns_monitor.get_node_ip(primary_node_name)
             if current_ipv4 or current_ipv6:
                 logger.info(f"Primary cfnat node '{primary_node_name}' DNS resolved to: IPv4={current_ipv4 if current_ipv4 else 'None'}, IPv6={current_ipv6 if current_ipv6 else 'None'}. (cfnat should be using this for outbound)")
