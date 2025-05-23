@@ -12,7 +12,7 @@ from logging.handlers import RotatingFileHandler
 # --- Configuration ---
 CONFIG_FILE = "config.json"
 LOCAL_PROXY_BIND_IP = "127.0.0.1"
-# NEW: This is the port our Python proxy will listen on for browser/app connections.
+# This is the port our Python proxy will listen on for browser/app connections.
 # This MUST NOT conflict with cfnat's listen_ports (e.g., 1234, 1235).
 LOCAL_PROXY_PORT = 8080 
 
@@ -62,11 +62,11 @@ def resolve_dns(hostname, record_type='A'):
         ips = [str(rdata) for rdata in answers]
         return ips
     except dns.resolver.NXDOMAIN:
-        logger.warning(f"DNS query failed: {hostname} does not exist.")
+        logger.debug(f"DNS query failed: {hostname} does not exist for type {record_type}.") # Changed to debug
     except dns.resolver.Timeout:
-        logger.warning(f"DNS query timed out: {hostname}.")
+        logger.warning(f"DNS query timed out: {hostname} for type {record_type}.")
     except Exception as e:
-        logger.error(f"DNS query for {hostname} encountered an error: {e}")
+        logger.error(f"DNS query for {hostname} ({record_type}) encountered an error: {e}")
     return []
 
 def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
@@ -82,20 +82,22 @@ def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
         ipv4_ips = resolve_dns(record_name, 'A')
         if ipv4_ips:
             current_ipv4 = ipv4_ips[0]
+            logger.info(f"[{node_name}] Resolved IPv4 for '{record_name}': {current_ipv4}")
         else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv4 address for {record_name}.")
+            logger.warning(f"[{node_name}] Failed to resolve IPv4 address for '{record_name}'.")
 
     if enable_ipv6:
         ipv6_ips = resolve_dns(record_name, 'AAAA')
         if ipv6_ips:
             current_ipv6 = ipv6_ips[0]
+            logger.info(f"[{node_name}] Resolved IPv6 for '{record_name}': {current_ipv6}")
         else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv6 address for {record_name}.")
+            logger.warning(f"[{node_name}] Failed to resolve IPv6 address for '{record_name}'.")
 
     with _dns_lock:
         _node_dns_ips[node_name] = {"ipv4": current_ipv4, "ipv6": current_ipv6}
         if current_ipv4 or current_ipv6:
-            logger.info(f"[{node_name}] Current DNS resolved IP: IPv4={current_ipv4}, IPv6={current_ipv6}")
+            logger.info(f"[{node_name}] Current DNS resolved IP: IPv4={current_ipv4 if current_ipv4 else 'None'}, IPv6={current_ipv6 if current_ipv6 else 'None'}")
 
 
 # --- DNSUpdateMonitor Class: Periodically updates DNS resolution results ---
@@ -125,7 +127,7 @@ class DNSUpdateMonitor:
         # Subsequent updates at regular intervals
         while self.is_running:
             time.sleep(30) # e.g., update DNS resolution every 30 seconds
-            logger.info("Refreshing DNS resolution results...")
+            logger.info("Refreshing DNS resolution results for cfnat-updated domains...")
             for node_name, node_info in self.nodes_config.items():
                 cf_config = node_info.get("cloudflare", {})
                 record_name = cf_config.get("record_name")
@@ -210,7 +212,9 @@ class MainProxyServer:
             while True:
                 chunk = client_socket.recv(4096)
                 if not chunk:
-                    raise ConnectionResetError("Client closed connection prematurely")
+                    # Client closed connection prematurely, or connection reset by peer
+                    logger.warning(f"[{client_addr}] Client closed connection prematurely or connection reset during header receive.")
+                    return
                 request_buffer += chunk
                 if b"\r\n\r\n" in request_buffer:
                     break
@@ -219,13 +223,15 @@ class MainProxyServer:
             method, path, _ = first_line.split(b' ', 2)
 
             if method == b'CONNECT':
-                logger.info(f"[{client_addr}] Received CONNECT request to {path.decode()}. Forwarding to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}...")
+                target_host_port = path.decode('utf-8')
+                logger.info(f"[{client_addr}] Received CONNECT request for {target_host_port}. Forwarding to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}...")
 
                 # Establish connection to cfnat's local listening port
                 remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 remote_socket.settimeout(5) # Set connection timeout to cfnat
                 remote_socket.connect((self.cfnat_target_ip, self.cfnat_target_port))
                 remote_socket.settimeout(None) # Remove timeout after connection
+                logger.info(f"[{client_addr}] Successfully connected to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}.")
 
                 # Reply to client that connection is established
                 client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -239,17 +245,19 @@ class MainProxyServer:
 
         except socket.timeout:
             logger.error(f"[{client_addr}] Connection to cfnat ({self.cfnat_target_ip}:{self.cfnat_target_port}) timed out.")
-            client_socket.sendall(f"HTTP/1.1 {http.client.GATEWAY_TIMEOUT} Gateway Timeout\r\n\r\n".encode())
+            if client_socket:
+                client_socket.sendall(f"HTTP/1.1 {http.client.GATEWAY_TIMEOUT} Gateway Timeout\r\n\r\n".encode())
         except ConnectionRefusedError:
             logger.error(f"[{client_addr}] Connection to cfnat ({self.cfnat_target_ip}:{self.cfnat_target_port}) refused. Is cfnat running and listening on this port?")
-            client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
+            if client_socket:
+                client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
         except Exception as e:
-            logger.error(f"[{client_addr}] Error handling client request: {e}")
+            logger.error(f"[{client_addr}] Error handling client request: {e}", exc_info=True) # Log full traceback
             if client_socket:
                 try:
                     client_socket.sendall(f"HTTP/1.1 {http.client.INTERNAL_SERVER_ERROR} Internal Server Error\r\n\r\n".encode())
                 except Exception as send_e:
-                    pass
+                    logger.error(f"[{client_addr}] Failed to send error response: {send_e}")
         finally:
             if client_socket:
                 client_socket.close()
@@ -267,13 +275,18 @@ class MainProxyServer:
                 for sock in rlist:
                     data = sock.recv(4096)
                     if not data:
-                        return
-                    if sock == sock1:
+                        logger.info(f"Connection closed by {sock.getpeername()}.")
+                        return # Connection closed
+                    if sock == sock1: # Data from client to cfnat
                         sock2.sendall(data)
-                    else:
+                    else: # Data from cfnat to client
                         sock1.sendall(data)
+            except ConnectionResetError:
+                logger.warning(f"Connection reset during data forwarding between {sock1.getpeername()} and {sock2.getpeername()}.")
+                return
             except Exception as e:
-                break
+                logger.error(f"Error during data forwarding: {e}", exc_info=True) # Log full traceback
+                return
 
     def stop(self):
         self.is_running = False
@@ -330,7 +343,7 @@ if __name__ == "__main__":
         exit()
 
     logger.info("\n--- cfnatddns proxy is running ---")
-    logger.info("This proxy forwards traffic to your running cfnat instance.")
+    logger.info("This proxy acts as an HTTP proxy, forwarding traffic to your local cfnat instance.")
     logger.info("Please ensure the cfnat client is running and listening on its configured port.")
     logger.info(f"Our proxy listens on: {LOCAL_PROXY_BIND_IP}:{LOCAL_PROXY_PORT}")
     logger.info(f"It forwards to cfnat's local listener at: {LOCAL_PROXY_BIND_IP}:{primary_cfnat_listen_port}")
@@ -341,7 +354,15 @@ if __name__ == "__main__":
 
     try:
         while True:
-            time.sleep(1)
+            # Periodically log the current DNS-resolved IP for the primary cfnat node
+            # This helps to see what IP cfnat *should* be using for outbound connections.
+            current_ipv4, current_ipv6 = dns_monitor.get_node_ip(primary_node_name)
+            if current_ipv4 or current_ipv6:
+                logger.info(f"Primary cfnat node '{primary_node_name}' DNS resolved to: IPv4={current_ipv4 if current_ipv4 else 'None'}, IPv6={current_ipv6 if current_ipv6 else 'None'}. (cfnat should be using this for outbound)")
+            else:
+                logger.warning(f"Primary cfnat node '{primary_node_name}' has no resolved IP yet. Check cfnat status and DNS.")
+
+            time.sleep(10) # Log this status every 10 seconds
 
     except KeyboardInterrupt:
         logger.info("Ctrl+C detected. Stopping program...")
