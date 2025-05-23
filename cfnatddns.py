@@ -1,6 +1,7 @@
 import socket
 import logging
 from logging.handlers import RotatingFileHandler
+import time
 
 # --- 日志配置 ---
 LOG_FILE_NAME = "cfnatddns.log"
@@ -35,16 +36,16 @@ def setup_logging(log_file_name, log_level_str):
 
 logger = setup_logging(LOG_FILE_NAME, LOG_LEVEL)
 
-def get_local_ip():
-    """ 获取本机的内网 IP 地址 """
+def get_local_ipv6():
+    """ 获取本机的内网 IPv6 地址 """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))  # 任意外部地址，只用于获取本地 IP
-        local_ip = s.getsockname()[0]
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(('2001:4860:4860::8888', 80))  # 使用 Google 的公共 IPv6 DNS 地址
+        local_ipv6 = s.getsockname()[0]
         s.close()
-        return local_ip
+        return local_ipv6
     except Exception:
-        return "127.0.0.1"
+        return "::1"  # 返回本地 IPv6 地址
 
 def connect_tcp_to_cf(host, port, path):
     """ 连接到 Cloudflare 代理服务器并模拟 HTTP 请求（带绝对路径） """
@@ -65,13 +66,17 @@ def connect_tcp_to_cf(host, port, path):
         return None
 
 if __name__ == '__main__':
-    local_ip = get_local_ip()
-    logger.info(f"本机内网 IP 地址: {local_ip}")
+    while True:
+        local_ipv6 = get_local_ipv6()
+        logger.info(f"本机内网 IPv6 地址: {local_ipv6}")
 
-    # 设置目标网站和端口
-    server_host = 'cloudflaremirrors.com'
-    server_port = 443  # 默认使用 443 端口 (HTTPS)
-    path = '/debian'  # 目标路径
+        # 设置目标网站和端口
+        server_host = 'cloudflaremirrors.com'
+        server_port = 443  # 默认使用 443 端口 (HTTPS)
+        path = '/debian'  # 目标路径
 
-    # 连接到 Cloudflare 代理服务器
-    connect_tcp_to_cf(server_host, server_port, path)
+        # 连接到 Cloudflare 代理服务器
+        connect_tcp_to_cf(server_host, server_port, path)
+
+        # 每隔 60 秒再次运行
+        time.sleep(60)  # 你可以根据需要调整间隔时间
