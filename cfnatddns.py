@@ -1,4 +1,4 @@
-import socket
+import requests
 import logging
 from logging.handlers import RotatingFileHandler
 import time
@@ -47,22 +47,16 @@ def get_local_ipv4():
     except Exception:
         return "127.0.0.1"  # 如果无法获取，返回默认 IPv4 地址
 
-def connect_tcp_to_cf(host, port, path):
-    """ 连接到 Cloudflare 代理服务器并模拟 HTTP 请求（带绝对路径） """
-    logger.info(f"尝试连接到 {host}:{port}，请求路径 {path}（Cloudflare 代理服务器）")
+def send_http_proxy_request(url, proxy):
+    """ 通过 HTTP 代理发送请求 """
     try:
-        # 通过 TCP 建立连接
-        with socket.create_connection((host, port), timeout=5) as sock:
-            # 构建 HTTP 请求，带绝对路径
-            request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-            sock.sendall(request.encode())
-            response = sock.recv(4096)  # 接收响应
-            logger.info(f"收到来自 Cloudflare 代理服务器的响应: {response.decode('utf-8', errors='ignore')[:100]}...")  # 只显示响应前 100 个字符
-            server_ip = sock.getpeername()[0]  # 获取 Cloudflare 代理服务器的 IP 地址
-            logger.info(f"成功与 Cloudflare 代理服务器建立 TCP 连接，代理 IP 地址: {server_ip}")
-            return server_ip
+        logger.info(f"通过 HTTP 代理 {proxy} 访问 {url}")
+        response = requests.get(url, proxies=proxy)
+        logger.info(f"响应代码: {response.status_code}")
+        logger.info(f"响应内容: {response.text[:100]}...")  # 只显示前 100 个字符
+        return response
     except Exception as e:
-        logger.error(f"TCP 连接失败: {e}")
+        logger.error(f"请求失败: {e}")
         return None
 
 if __name__ == '__main__':
@@ -70,13 +64,19 @@ if __name__ == '__main__':
         local_ipv4 = get_local_ipv4()
         logger.info(f"本机内网 IPv4 地址: {local_ipv4}")
 
-        # 设置目标网站和端口
+        # 设置目标网站和代理
         server_host = 'cloudflaremirrors.com'
-        server_port = 1234  # 端口 1234 进行连接
         path = '/debian'  # 目标路径
+        url = f"http://{server_host}{path}"
 
-        # 连接到 Cloudflare 代理服务器
-        connect_tcp_to_cf(server_host, server_port, path)
+        # 设置代理，这里使用示例代理，你需要替换成你实际使用的代理服务器
+        proxy = {
+            "http": f"http://{local_ipv4}:1234",  # 本机 IP 和端口 1234
+            "https": f"http://{local_ipv4}:1234",  # 本机 IP 和端口 1234
+        }
+
+        # 通过代理发送 HTTP 请求
+        send_http_proxy_request(url, proxy)
 
         # 每 10 秒清理一次日志
         time.sleep(10)
