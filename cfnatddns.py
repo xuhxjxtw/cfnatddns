@@ -1,391 +1,126 @@
+import os
+import sys
+import json
 import socket
 import threading
 import time
-import json
-import select
-import http.client
-import dns.resolver
+import requests
 import logging
-import os
-from logging.handlers import RotatingFileHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- Configuration ---
-CONFIG_FILE = "config.json"
-LOCAL_PROXY_BIND_IP = "127.0.0.1"
-LOCAL_PROXY_PORT = 8080 
+CONFIG_PATH = 'config.json'
+IP_CHECK_INTERVAL = 300  # 秒（5 分钟）
 
-CLOUDFLARE_CDN_PORT = 443 
-DNS_TIMEOUT = 5 # seconds for DNS resolution
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
-# --- Logging Setup ---
-LOG_DIR = "logs"
-LOG_FILE = os.path.join(LOG_DIR, "cfnatddns.log")
-MAX_LOG_SIZE = 5 * 1024 * 1024 # 5 MB
-BACKUP_COUNT = 3 # Keep 3 backup log files
+def load_config():
+    with open(CONFIG_PATH, 'r') as f:
+        return json.load(f)
 
-# Configure logger
-logger = logging.getLogger('cfnatddns_logger')
-logger.setLevel(logging.INFO)
-
-# Always add a console handler first, so early errors can be seen even if file logging fails
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(console_handler)
-
-# Try to set up file handler for persistent logs
-try:
-    # Ensure log directory exists, exist_ok=True prevents error if it already exists
-    if not os.path.exists(LOG_DIR):
-        os.makedirs(LOG_DIR, exist_ok=True)
-    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding='utf-8')
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logger.addHandler(file_handler)
-    logger.info(f"File logging enabled to {LOG_FILE}")
-except Exception as e:
-    logger.error(f"Failed to set up file logging: {e}. Logging only to console.")
-
-# --- Global variables and locks ---
-_node_dns_ips = {} # Stores DNS resolution results for each node (for logging/monitoring)
-_dns_lock = threading.Lock() # Thread-safe lock
-
-# --- Helper function: DNS Query ---
-def resolve_dns(hostname, record_type='A'):
-    """
-    Queries the specified hostname for A or AAAA records using dnspython.
-    """
+def get_public_ip(ipv6=False):
     try:
-        resolver = dns.resolver.Resolver()
-        resolver.timeout = DNS_TIMEOUT
-        resolver.lifetime = DNS_TIMEOUT
-        answers = resolver.resolve(hostname, record_type)
-        ips = [str(rdata) for rdata in answers]
-        return ips
-    except dns.resolver.NXDOMAIN:
-        logger.error(f"DNS query for {hostname} ({record_type}) encountered an error: The DNS response does not contain an answer to the question: {hostname}. IN {record_type}")
-        logger.debug(f"DNS query failed: {hostname} does not exist for type {record_type}.")
-    except dns.resolver.Timeout:
-        logger.warning(f"DNS query timed out: {hostname} for type {record_type}.")
+        url = 'https://api64.ipify.org' if ipv6 else 'https://api.ipify.org'
+        return requests.get(url, timeout=10).text.strip()
     except Exception as e:
-        logger.error(f"DNS query for {hostname} ({record_type}) encountered an error: {e}")
-    return []
+        logging.warning(f'获取 {"IPv6" if ipv6 else "IPv4"} 地址失败: {e}')
+        return None
 
-def update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6):
-    """
-    Queries and updates the best IP for the specified node.
-    This is primarily for logging/monitoring what cfnat is doing.
-    """
-    global _node_dns_ips
-    current_ipv4 = None
-    current_ipv6 = None
+class CloudflareAPI:
+    def __init__(self, config):
+        self.zone_id = config['zone_id']
+        self.record_id_v4 = config.get('record_id_v4')
+        self.record_id_v6 = config.get('record_id_v6')
+        self.record_name = config['record_name']
+        self.api_token = config['api_token']
+        self.enable_ipv4 = config.get('enable_ipv4', True)
+        self.enable_ipv6 = config.get('enable_ipv6', False)
 
-    if enable_ipv4:
-        ipv4_ips = resolve_dns(record_name, 'A')
-        if ipv4_ips:
-            current_ipv4 = ipv4_ips[0]
-            logger.info(f"[{node_name}] Resolved IPv4 for '{record_name}': {current_ipv4}")
-        else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv4 address for '{record_name}'.")
+    def update_dns_record(self, ip, record_type):
+        record_id = self.record_id_v4 if record_type == 'A' else self.record_id_v6
+        if not record_id:
+            return
 
-    if enable_ipv6:
-        ipv6_ips = resolve_dns(record_name, 'AAAA')
-        if ipv6_ips:
-            current_ipv6 = ipv6_ips[0]
-            logger.info(f"[{node_name}] Resolved IPv6 for '{record_name}': {current_ipv6}")
-        else:
-            logger.warning(f"[{node_name}] Failed to resolve IPv6 address for '{record_name}'.")
+        url = f'https://api.cloudflare.com/client/v4/zones/{self.zone_id}/dns_records/{record_id}'
+        headers = {
+            'Authorization': f'Bearer {self.api_token}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'type': record_type,
+            'name': self.record_name,
+            'content': ip,
+            'ttl': 300,
+            'proxied': False
+        }
 
-    with _dns_lock:
-        _node_dns_ips[node_name] = {"ipv4": current_ipv4, "ipv6": current_ipv6}
-        if current_ipv4 or current_ipv6:
-            logger.info(f"[{node_name}] Current DNS resolved IP: IPv4={current_ipv4 if current_ipv4 else 'None'}, IPv6={current_ipv6 if current_ipv6 else 'None'}")
-
-
-# --- DNSUpdateMonitor Class: Periodically updates DNS resolution results ---
-class DNSUpdateMonitor:
-    def __init__(self, nodes_config):
-        self.nodes_config = nodes_config
-        self.is_running = False
-        self.monitor_thread = None
-
-    def start(self):
-        self.is_running = True
-        self.monitor_thread = threading.Thread(target=self._run_monitor)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-        logger.info("DNS update monitor started.")
-
-    def _run_monitor(self):
-        # Initial update for all nodes immediately
-        for node_name, node_info in self.nodes_config.items():
-            cf_config = node_info.get("cloudflare", {})
-            record_name = cf_config.get("record_name")
-            enable_ipv4 = cf_config.get("enable_ipv4", True)
-            enable_ipv6 = cf_config.get("enable_ipv6", True)
-            if record_name:
-                update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6)
-
-        # Subsequent updates at regular intervals
-        while self.is_running:
-            time.sleep(30) # e.g., update DNS resolution every 30 seconds
-            if self.is_running:  # Check again after sleep
-                logger.info("Refreshing DNS resolution results for cfnat-updated domains...")
-                for node_name, node_info in self.nodes_config.items():
-                    cf_config = node_info.get("cloudflare", {})
-                    record_name = cf_config.get("record_name")
-                    enable_ipv4 = cf_config.get("enable_ipv4", True)
-                    enable_ipv6 = cf_config.get("enable_ipv6", True)
-                    if record_name:
-                        update_node_ips(node_name, record_name, enable_ipv4, enable_ipv6)
-
-    def stop(self):
-        self.is_running = False
-        if self.monitor_thread:
-            self.monitor_thread.join(timeout=5)
-        logger.info("DNS update monitor stopped.")
-
-    def get_node_ip(self, node_name, prefer_ipv6=False):
-        """Gets the current best IP for the specified node."""
-        with _dns_lock:
-            node_data = _node_dns_ips.get(node_name, {})
-            ipv4 = node_data.get("ipv4")
-            ipv6 = node_data.get("ipv6")
-            
-            if prefer_ipv6 and ipv6:
-                return ipv4, ipv6
-            elif ipv4:
-                return ipv4, ipv6
-            return None, None
-
-# --- MainProxyServer Class: Our Python proxy that forwards to cfnat ---
-class MainProxyServer:
-    def __init__(self, listen_ip, listen_port, cfnat_target_ip, cfnat_target_port):
-        self.listen_ip = listen_ip
-        self.listen_port = listen_port
-        self.cfnat_target_ip = cfnat_target_ip
-        self.cfnat_target_port = cfnat_target_port
-        self.server_socket = None
-        self.is_running = False
-        self.server_thread = None
-
-    def start(self):
         try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind((self.listen_ip, self.listen_port))
-            self.server_socket.listen(5)
-            self.is_running = True
-            logger.info(f"Main Proxy Server started, listening on {self.listen_ip}:{self.listen_port}")
-            logger.info(f"All traffic will be forwarded to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}")
-
-            self.server_thread = threading.Thread(target=self._accept_connections)
-            self.server_thread.daemon = True
-            self.server_thread.start()
-            return True
-        except OSError as e:
-            if e.errno == 10048: # Windows specific error for "Address already in use"
-                logger.critical(f"Failed to start Main Proxy Server: Port {self.listen_port} is already in use. Please choose a different LOCAL_PROXY_PORT.")
+            resp = requests.put(url, headers=headers, json=data, timeout=10)
+            if resp.ok:
+                logging.info(f'{self.record_name} ({record_type}) 更新为 {ip}')
             else:
-                logger.critical(f"Failed to start Main Proxy Server (OSError): {e}")
-            return False
+                logging.warning(f'{self.record_name} ({record_type}) 更新失败: {resp.text}')
         except Exception as e:
-            logger.critical(f"Failed to start Main Proxy Server (General Error): {e}")
-            return False
+            logging.warning(f'更新 {record_type} 记录异常: {e}')
 
-    def _accept_connections(self):
-        while self.is_running:
-            try:
-                rlist, _, _ = select.select([self.server_socket], [], [], 1)
-                if self.server_socket in rlist:
-                    client_socket, client_addr = self.server_socket.accept()
-                    logger.info(f"Received connection from {client_addr}.")
-                    client_thread = threading.Thread(
-                        target=self._handle_client,
-                        args=(client_socket, client_addr)
-                    )
-                    client_thread.daemon = True
-                    client_thread.start()
-            except Exception as e:
-                if self.is_running:
-                    logger.error(f"Error accepting connection: {e}")
-                break
+class DNSUpdateMonitor(threading.Thread):
+    def __init__(self, nodes):
+        super().__init__(daemon=True)
+        self.nodes = nodes
+        self.last_ip_v4 = None
+        self.last_ip_v6 = None
 
-    def _handle_client(self, client_socket, client_addr):
-        remote_socket = None
-        try:
-            request_buffer = b""
-            while True:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    logger.warning(f"[{client_addr}] Client closed connection prematurely or connection reset during header receive.")
-                    return
-                request_buffer += chunk
-                if b"\r\n\r\n" in request_buffer:
-                    break
-
-            first_line = request_buffer.split(b"\r\n")[0]
-            method, path, _ = first_line.split(b' ', 2)
-
-            if method == b'CONNECT':
-                target_host_port = path.decode('utf-8')
-                logger.info(f"[{client_addr}] Received CONNECT request for {target_host_port}. Forwarding to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}...")
-
-                remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                remote_socket.settimeout(5) # Set connection timeout to cfnat
-                remote_socket.connect((self.cfnat_target_ip, self.cfnat_target_port))
-                remote_socket.settimeout(None) # Remove timeout after connection
-                logger.info(f"[{client_addr}] Successfully connected to cfnat at {self.cfnat_target_ip}:{self.cfnat_target_port}.")
-
-                client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-
-                self._forward_data(client_socket, remote_socket)
-            else:
-                logger.warning(f"[{client_addr}] Received non-CONNECT HTTP method ({method.decode()}). This proxy only supports HTTPS (CONNECT method).")
-                client_socket.sendall(b"HTTP/1.1 501 Not Implemented\r\n\r\n")
-                client_socket.close()
-
-        except socket.timeout:
-            logger.error(f"[{client_addr}] Connection to cfnat ({self.cfnat_target_ip}:{self.cfnat_target_port}) timed out.")
-            if client_socket:
-                try:
-                    client_socket.sendall(f"HTTP/1.1 {http.client.GATEWAY_TIMEOUT} Gateway Timeout\r\n\r\n".encode())
-                except:
-                    pass
-        except ConnectionRefusedError:
-            logger.error(f"[{client_addr}] Connection to cfnat ({self.cfnat_target_ip}:{self.cfnat_target_port}) refused. Is cfnat running and listening on this port?")
-            if client_socket:
-                try:
-                    client_socket.sendall(f"HTTP/1.1 {http.client.BAD_GATEWAY} Bad Gateway\r\n\r\n".encode())
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"[{client_addr}] Error handling client request: {e}")
-            if client_socket:
-                try:
-                    client_socket.sendall(f"HTTP/1.1 {http.client.INTERNAL_SERVER_ERROR} Internal Server Error\r\n\r\n".encode())
-                except Exception as send_e:
-                    logger.error(f"[{client_addr}] Failed to send error response: {send_e}")
-        finally:
-            try:
-                if client_socket:
-                    client_socket.close()
-            except:
-                pass
-            try:
-                if 'remote_socket' in locals() and remote_socket:
-                    remote_socket.close()
-            except:
-                pass
-
-    def _forward_data(self, sock1, sock2):
-        sockets = [sock1, sock2]
+    def run(self):
         while True:
-            try:
-                rlist, _, _ = select.select(sockets, [], [], 1)
-                if not rlist:
+            ip_v4 = get_public_ip()
+            ip_v6 = get_public_ip(ipv6=True)
+
+            for name, node in self.nodes.items():
+                cf_cfg = node.get('cloudflare')
+                if not cf_cfg:
                     continue
 
-                for sock in rlist:
-                    data = sock.recv(4096)
-                    if not data:
-                        logger.info(f"Connection closed by peer.")
-                        return
-                    if sock == sock1:
-                        sock2.sendall(data)
-                    else:
-                        sock1.sendall(data)
-            except ConnectionResetError:
-                logger.warning(f"Connection reset during data forwarding.")
-                return
-            except Exception as e:
-                logger.error(f"Error during data forwarding: {e}")
-                return
+                api = CloudflareAPI(cf_cfg)
 
-    def stop(self):
-        self.is_running = False
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except:
-                pass
-            logger.info(f"Main Proxy Server stopped.")
-        if self.server_thread:
-            self.server_thread.join(timeout=5)
+                if api.enable_ipv4 and ip_v4 and ip_v4 != self.last_ip_v4:
+                    api.update_dns_record(ip_v4, 'A')
 
-# --- Main program logic ---
-if __name__ == "__main__":
-    # Log initial message before config loading
-    logger.info("Initializing cfnatddns proxy application...")
+                if api.enable_ipv6 and ip_v6 and ip_v6 != self.last_ip_v6:
+                    api.update_dns_record(ip_v6, 'AAAA')
 
-    # 1. Read configuration file
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        nodes_config = config.get("nodes", {})
-        if not nodes_config:
-            logger.critical(f"Error: 'nodes' configuration not found in {CONFIG_FILE}. Exiting.")
-            exit(1)
-        logger.info(f"Configuration loaded from {CONFIG_FILE}.")
-    except FileNotFoundError:
-        logger.critical(f"Error: Configuration file {CONFIG_FILE} not found. Please ensure the file exists. Exiting.")
-        exit(1)
-    except json.JSONDecodeError as e:
-        logger.critical(f"Error: {CONFIG_FILE} has invalid JSON format: {e}. Exiting.")
-        exit(1)
-    except Exception as e:
-        logger.critical(f"An unknown error occurred while reading the configuration file: {e}. Exiting.")
-        exit(1)
+            self.last_ip_v4 = ip_v4
+            self.last_ip_v6 = ip_v6
+            time.sleep(IP_CHECK_INTERVAL)
 
-    # Get the name and listen_port of the first node from config.json
-    primary_node_name = next(iter(nodes_config), None)
-    if not primary_node_name:
-        logger.critical("No nodes configured in config.json. Exiting.")
-        exit(1)
-    
-    primary_cfnat_listen_port = nodes_config[primary_node_name].get("listen_port")
-    if not primary_cfnat_listen_port:
-        logger.critical(f"Node '{primary_node_name}' does not have 'listen_port' configured. This port is needed for connecting to cfnat. Exiting.")
-        exit(1)
-    logger.info(f"Using primary cfnat node '{primary_node_name}' with local listen port {primary_cfnat_listen_port} for forwarding.")
+# 示例 HTTP 代理（简化）
+class ProxyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"代理正常运行中")
 
-    # 2. Start DNS update monitor (still monitors all nodes, for logging/monitoring cfnat's DNS updates)
-    dns_monitor = DNSUpdateMonitor(nodes_config)
-    dns_monitor.start()
+def start_http_proxy(port):
+    server = HTTPServer(('0.0.0.0', port), ProxyHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logging.info(f'HTTP 代理启动，监听端口 {port}')
 
-    # 3. Start our main proxy server, forwarding to cfnat's local listener
-    main_proxy_server = MainProxyServer(LOCAL_PROXY_BIND_IP, LOCAL_PROXY_PORT, 
-                                        LOCAL_PROXY_BIND_IP, primary_cfnat_listen_port)
-    
-    if not main_proxy_server.start():
-        logger.critical("Main proxy server failed to start, exiting.")
-        dns_monitor.stop()
-        exit(1)
+def main():
+    config = load_config()
+    nodes = config.get('nodes', {})
 
-    logger.info("\n--- cfnatddns proxy is running ---")
-    logger.info("This proxy acts as an HTTP proxy, forwarding traffic to your local cfnat instance.")
-    logger.info("Please ensure the cfnat client is running and listening on its configured port.")
-    logger.info(f"Our proxy listens on: {LOCAL_PROXY_BIND_IP}:{LOCAL_PROXY_PORT}")
-    logger.info(f"It forwards to cfnat's local listener at: {LOCAL_PROXY_BIND_IP}:{primary_cfnat_listen_port}")
-    logger.info(f"Please set your browser/app proxy to HTTP proxy {LOCAL_PROXY_BIND_IP}:{LOCAL_PROXY_PORT}")
-    logger.info(" (This proxy only supports HTTPS (CONNECT method) forwarding)")
-    logger.info(f"Logs are being written to {LOG_FILE}")
-    logger.info("Press Ctrl+C to exit.")
+    # 启动每个节点的本地代理
+    for name, node in nodes.items():
+        port = node.get('listen_port', 8080)
+        start_http_proxy(port)
 
+    # 启动 Cloudflare DDNS 线程
+    DNSUpdateMonitor(nodes).start()
+
+    # 主线程保持运行
     try:
         while True:
-            # Periodically log the current DNS-resolved IP for the primary cfnat node
-            current_ipv4, current_ipv6 = dns_monitor.get_node_ip(primary_node_name)
-            if current_ipv4 or current_ipv6:
-                logger.info(f"Primary cfnat node '{primary_node_name}' DNS resolved to: IPv4={current_ipv4 if current_ipv4 else 'None'}, IPv6={current_ipv6 if current_ipv6 else 'None'}. (cfnat should be using this for outbound)")
-            else:
-                logger.warning(f"Primary cfnat node '{primary_node_name}' has no resolved IP yet. Check cfnat status and DNS.")
-
-            time.sleep(10) # Log this status every 10 seconds
-
+            time.sleep(3600)
     except KeyboardInterrupt:
-        logger.info("Ctrl+C detected. Stopping program...")
-    except Exception as e:
-        logger.error(f"Unexpected error in main loop: {e}")
-    finally:
-        main_proxy_server.stop()
-        dns_monitor.stop()
-        logger.info("Program exited safely.")
+        sys.exit(0)
+
+if __name__ == '__main__':
+    main()
