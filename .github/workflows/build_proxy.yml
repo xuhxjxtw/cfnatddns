@@ -38,8 +38,6 @@ jobs:
           mkdir dist_bundle
           # Copy the generated executable from the 'dist' folder
           copy dist\cfnatddns.exe dist_bundle\cfnatddns.exe
-          # Copy the external config.json file into the bundle
-          copy config.json dist_bundle\
 
       - name: Zip output bundle
         run: |
