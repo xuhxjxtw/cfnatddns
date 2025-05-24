@@ -1,27 +1,38 @@
 import subprocess
-import shlex
 import re
+import yaml
 from datetime import datetime
 
-cmd_file = "cmd.txt"
+exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
+config_file = "config.yaml"
 
+# 正则模式
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
 
-# 读取命令
+# 读取 YAML 配置
 try:
-    with open(cmd_file, "r", encoding="utf-8") as f:
-        raw_cmd = f.read().strip()
-        cmd = shlex.split(raw_cmd)  # 分割命令为列表，自动处理引号等
+    with open(config_file, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
 except Exception as e:
-    print(f"读取命令失败: {e}")
+    print(f"读取配置失败: {e}")
     exit(1)
+
+# 构造参数
+args = [
+    exe_name,
+    f"-colo={config.get('colo', 'MAA')}",
+    f"-port={config.get('port', 8443)}",
+    f"-addr={config.get('addr', '0.0.0.0:1236')}",
+    f"-ips={config.get('ips', 6)}",
+    f"-delay={config.get('delay', 3000)}"
+]
 
 # 启动进程
 try:
     proc = subprocess.Popen(
-        cmd,
+        args,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -33,7 +44,7 @@ except Exception as e:
     print(f"启动失败: {e}")
     exit(1)
 
-# 写入日志
+# 监控输出并记录日志
 with open(log_file, "a", encoding="utf-8") as log:
     log.write(f"\n\n--- 日志开始于 {datetime.now()} ---\n")
     for line in proc.stdout:
