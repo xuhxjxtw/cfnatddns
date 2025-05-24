@@ -1,35 +1,51 @@
-name: Build cfnatddns EXE
+name: Build Proxy EXE
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering from GitHub UI
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-latest # Using a Windows runner to build a Windows .exe
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3 # Checks out your repository code
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v4 # Sets up Python environment
         with:
-          python-version: '3.10'
+          python-version: '3.10' # Specify the Python version
 
       - name: Install dependencies
-        run: pip install pyinstaller pyyaml requests
+        run: |
+          # Install pyinstaller for bundling, and dnspython for DNS lookups
+          pip install pyinstaller dnspython
 
-      - name: Build EXE
-        run: pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns
+      - name: Build executable
+        run: |
+          # Build the Python script into a single .exe file
+          # --onefile: Creates a single executable file
+          # --name cfnatddns: Sets the name of the executable to cfnatddns.exe
+          # The script name is now explicitly 'cfnatddns.py'
+          pyinstaller cfnatddns.py --onefile --name cfnatddns
 
-      - name: Zip EXE only
-        run: powershell Compress-Archive -Path dist\cfnatddns.exe -DestinationPath cfnatddns.zip
+      - name: Create bundle directory and copy files
+        run: |
+          # Create a directory to hold the executable and its external config file
+          mkdir dist_bundle
+          # Copy the generated executable from the 'dist' folder
+          copy dist\cfnatddns.exe dist_bundle\cfnatddns.exe
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Zip output bundle
+        run: |
+          # Use PowerShell to compress the 'dist_bundle' directory into a zip file
+          powershell Compress-Archive -Path dist_bundle\* -DestinationPath cfnatddns.zip
+
+      - name: Upload EXE ZIP as artifact
+        uses: actions/upload-artifact@v4 # Uploads the generated zip file as a workflow artifact
         with:
-          name: cfnatddns_exe
-          path: cfnatddns.zip
+          name: cfnatddns_bundle # Name of the artifact
+          path: cfnatddns.zip # Path to the zip file to upload
