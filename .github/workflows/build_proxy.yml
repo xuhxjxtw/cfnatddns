@@ -4,15 +4,15 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allows manual triggering from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest # Use a Windows runner to build the Windows .exe
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3 # Checks out your repository code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -27,18 +27,11 @@ jobs:
         run: |
           pyinstaller cfnatddns.py --onefile --name cfnatddns
 
-      - name: Check config.yaml exists
-        run: |
-          if not exist config.yaml (
-            echo "ERROR: config.yaml not found!"
-            exit /b 1
-          )
-
       - name: Create bundle directory and copy files
         run: |
           mkdir dist_bundle
           copy dist\cfnatddns.exe dist_bundle\cfnatddns.exe
-          copy config.yaml dist_bundle\config.yaml
+          if exist config.yaml copy config.yaml dist_bundle\config.yaml
 
       - name: Zip output bundle
         run: |
