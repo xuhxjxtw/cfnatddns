@@ -23,14 +23,17 @@ jobs:
         run: |
           pip install pyinstaller requests pyyaml pystray pillow pywin32
 
-      - name: Build executable
-        run: pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns --icon=icon.ico
+      - name: Build executables
+        run: |
+          pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns --icon=icon.ico
+          pyinstaller cfupload.py  --onefile --noconsole --name cfupload
+          pyinstaller ipfilter.py  --onefile --noconsole --name ipfilter
 
-      - name: Zip built executable
-        run: powershell Compress-Archive -Path dist\cfnatddns.exe -DestinationPath cfnatddns.zip
+      - name: Zip all executables
+        run: powershell Compress-Archive -Path dist\* -DestinationPath proxy_tools_bundle.zip
 
       - name: Upload zip artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cfnatddns_bundle
-          path: cfnatddns.zip
+          name: proxy_tools_bundle
+          path: proxy_tools_bundle.zip
