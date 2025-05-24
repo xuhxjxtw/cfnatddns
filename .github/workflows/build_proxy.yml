@@ -21,11 +21,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller dnspython pyyaml requests pystray pillow
+          pip install pyinstaller requests pyyaml
 
       - name: Build executable
         run: |
-          pyinstaller cfnatddns.py --onefile --name cfnatddns --icon=icon.ico
+          pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns --icon=icon.ico
 
       - name: Zip built executable
         run: |
