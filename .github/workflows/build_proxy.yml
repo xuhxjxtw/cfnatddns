@@ -1,4 +1,4 @@
-name: Build Proxy EXE
+name: Build cfnatddns EXE
 
 on:
   push:
@@ -21,24 +21,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller requests pyyaml pystray pillow pywin32
+          pip install pyinstaller pyyaml
 
-      - name: Build executables
+      - name: Build executable
+        run: pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns
+
+      - name: Zip EXE + YAML
         run: |
-          pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns --icon=icon.ico
-          pyinstaller cfupload.py  --onefile --noconsole --name cfupload
-          pyinstaller ipfilter.py  --onefile --noconsole --name ipfilter
+          copy config.yaml dist\
+          powershell Compress-Archive -Path dist\* -DestinationPath cfnatddns_bundle.zip
 
-      - name: Copy config files
-        run: |
-          mkdir dist\config
-          copy *.yaml dist\config\
-
-      - name: Zip all executables and config
-        run: powershell Compress-Archive -Path dist\* -DestinationPath proxy_tools_bundle.zip
-
-      - name: Upload zip artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: proxy_tools_bundle
-          path: proxy_tools_bundle.zip
+          name: cfnatddns_bundle
+          path: cfnatddns_bundle.zip
