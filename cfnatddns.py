@@ -2,18 +2,16 @@ import subprocess
 import re
 import yaml
 import requests
-import time
-import os
+import ipaddress
 
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
 config_file = "config.yaml"
 
-# 匹配 IPv4 和 IPv6 地址（不含端口）
+# 正则匹配 IPv4 和 IPv6（不带端口）
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-ipv6_pattern = re.compile(r"?([a-fA-F0-9:]+)?")
+ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
 
-# 当前已记录的 IP
 current_ip = None
 
 # 读取配置
@@ -24,16 +22,24 @@ except Exception as e:
     print(f"读取配置失败: {e}")
     exit(1)
 
-# Cloudflare 信息
+# Cloudflare 配置
 cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
 
+def get_ip_type(ip):
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        return "A" if ip_obj.version == 4 else "AAAA"
+    except ValueError:
+        return None
+
 def update_cf_dns(ip):
-    if not (cf_email and cf_api_key and cf_zone_id and cf_record_name):
-        print("Cloudflare 配置不完整，跳过 DNS 更新。")
+    record_type = get_ip_type(ip)
+    if not record_type:
+        print(f"[跳过] 无效 IP 地址: {ip}")
         return
 
     headers = {
@@ -42,46 +48,43 @@ def update_cf_dns(ip):
         "Content-Type": "application/json"
     }
 
-    # 判断记录类型
-    record_type = "A" if ":" not in ip else "AAAA"
-
-    # 查询现有记录
-    url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?name={cf_record_name}&type={record_type}"
-    try:
-        r = requests.get(url, headers=headers)
-        r.raise_for_status()
-        result = r.json()
-        records = result.get("result", [])
-        record_id = records[0]["id"] if records else None
-    except Exception as e:
-        print(f"[{record_type}] 查询 DNS 记录失败: {e}")
-        return
-
-    # 准备更新请求
-    data = {
-        "type": record_type,
-        "name": cf_record_name,
-        "content": ip,
-        "ttl": 120,
-        "proxied": False
-    }
-
-    if record_id:
-        update_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records/{record_id}"
-        method = requests.put
-    else:
-        update_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
-        method = requests.post
+    url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
+    params = {"type": record_type, "name": cf_record_name}
 
     try:
-        resp = method(update_url, headers=headers, json=data)
+        resp = requests.get(url, headers=headers, params=params)
         result = resp.json()
-        if result.get("success"):
+
+        if not result.get("success"):
+            print(f"[{record_type}] 查询 DNS 记录失败: {result}")
+            return
+
+        records = result.get("result", [])
+        if not records:
+            print(f"[{record_type}] 找不到 DNS 记录: {cf_record_name}")
+            return
+
+        record_id = records[0]["id"]
+
+        update_url = f"{url}/{record_id}"
+        data = {
+            "type": record_type,
+            "name": cf_record_name,
+            "content": ip,
+            "ttl": 120,
+            "proxied": False
+        }
+
+        update_resp = requests.put(update_url, headers=headers, json=data)
+        update_result = update_resp.json()
+
+        if update_result.get("success"):
             print(f"[{record_type}] Cloudflare DNS 已更新: {ip}")
         else:
-            print(f"[{record_type}] DNS 更新失败: {result}")
+            print(f"[{record_type}] DNS 更新失败: {update_result}")
+
     except Exception as e:
-        print(f"[{record_type}] DNS 更新请求失败: {e}")
+        print(f"[{record_type}] 更新异常: {e}")
 
 # 构造参数
 args = [
@@ -114,17 +117,10 @@ for line in proc.stdout:
     print(line)
 
     if "最佳" in line or "best" in line.lower():
-        raw_ips = ipv4_pattern.findall(line) + [match[0] for match in ipv6_pattern.findall(line)]
-        cleaned_ips = []
+        # 提取所有 IPv4 和 IPv6 地址
+        ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
 
-        for ip in raw_ips:
-            if ":" in ip:
-                ip = ip.strip("[]").split("]:")[0] if "]" in ip else ip.split(":")
-                if isinstance(ip, list) and len(ip) > 1:
-                    ip = ":".join(ip[:-1])
-            cleaned_ips.append(ip)
-
-        for ip in cleaned_ips:
+        for ip in ips:
             if ip != current_ip:
                 with open(log_file, "w", encoding="utf-8") as log:
                     log.write(ip + "\n")
