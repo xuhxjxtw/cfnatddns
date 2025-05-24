@@ -3,6 +3,7 @@ import re
 import time
 import os
 import datetime
+import glob # 导入 glob 模块用于文件路径匹配
 
 # 定义日志文件名
 LOG_FILE_NAME = "cfnat_ips.log"
@@ -12,7 +13,8 @@ def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120)
     启动代理程序，并从其标准输出中实时提取 Cloudflare IP 地址，并记录到日志文件。
 
     Args:
-        proxy_command (list): 启动代理程序的命令，例如 ["./your_proxy_executable"]。
+        proxy_command (list): 启动代理程序的命令，例如 ["./cmd_tray-HKG.exe"]。
+                              这里传入的是实际要执行的完整命令列表。
         max_ips (int): 收集到多少个不同的IP后停止。
         timeout_seconds (int): 脚本运行的最长时间（秒）。
 
@@ -36,16 +38,19 @@ def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120)
         r')\b'
     )
 
-    # 尝试以追加模式打开日志文件，如果文件不存在则创建
-    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LOG_FILE_NAME)
+    # 获取当前脚本所在目录
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = os.path.join(script_dir, LOG_FILE_NAME)
+    
+    log_file = None
     try:
         log_file = open(log_path, 'a', encoding='utf-8')
         log_file.write(f"\n[{datetime.datetime.now()}] --- 开始收集 Cloudflare IP --- \n")
-        log_file.flush() # 立即写入
+        log_file.flush()
         print(f"日志将写入到: {log_path}")
     except Exception as e:
         print(f"错误：无法打开日志文件 {log_path}，将只在控制台输出。错误信息: {e}")
-        log_file = None # 标记为无法写入文件
+        log_file = None
 
     def log_message(message, to_file=True):
         """同时打印到控制台和日志文件"""
@@ -64,7 +69,7 @@ def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120)
             text=True,
             encoding='utf-8',
             bufsize=1,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+            cwd=script_dir # 确保在脚本所在目录执行命令
         )
 
         log_message(f"开始监听代理服务的输出，最多等待 {timeout_seconds} 秒，或直到收集到 {max_ips} 个IP...")
@@ -97,7 +102,7 @@ def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120)
                     ips_found.add(ip_match)
 
     except FileNotFoundError:
-        log_message(f"错误：找不到可执行文件或脚本。请检查命令是否正确，以及是否在当前目录下。")
+        log_message(f"错误：找不到代理启动器。请确认 '{proxy_command[0]}' 存在于 '{script_dir}' 目录下，或其路径正确。")
         log_message(f"尝试运行的命令：{' '.join(proxy_command)}")
     except Exception as e:
         log_message(f"运行或解析过程中发生错误: {e}")
@@ -114,26 +119,41 @@ def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120)
         log_message("IP 收集完成。")
         log_message(f"--- Cloudflare IP 列表 (共 {len(ips_found)} 个) ---")
         if ips_found:
-            for ip in sorted(list(ips_found)): # 排序后写入，方便查看
+            for ip in sorted(list(ips_found)):
                 log_message(ip)
         else:
             log_message("未获取到任何 Cloudflare IP 地址。")
         log_message(f"[{datetime.datetime.now()}] --- 收集结束 --- \n")
         
         if log_file:
-            log_file.close() # 关闭日志文件
+            log_file.close()
+
     return list(ips_found)
 
 
 # --- 脚本运行入口 ---
 if __name__ == "__main__":
-    # 请确认 'cmd_tray.HKG.exe' 与此 Python 脚本在同一个目录下。
-    proxy_start_command = ["./cmd_tray.HKG.exe"]
+    # 定义代理启动器的文件名模式
+    # 这会匹配如 cmd_tray-HKG.exe, cmd_tray-USA.exe 等
+    proxy_launcher_pattern = "cmd_tray-*.exe"
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 使用 glob 在当前目录下查找匹配模式的文件
+    matching_files = glob.glob(os.path.join(script_dir, proxy_launcher_pattern))
+    
+    if not matching_files:
+        print(f"错误：在当前目录下未找到匹配 '{proxy_launcher_pattern}' 的代理启动器文件。")
+        print("请确保你的代理启动器（如 cmd_tray-HKG.exe）存在于此目录下。")
+        exit(1) # 退出脚本
 
-    if not os.path.exists(proxy_start_command[0]):
-        print(f"错误：未能找到代理启动器 '{proxy_start_command[0]}'。")
-        print("请确保 'cmd_tray.HKG.exe' 文件与 'cfnatddnd.py' 脚本在同一个目录下。")
-        print("如果文件名不是 'cmd_tray.HKG.exe'，请修改脚本中的 proxy_start_command 变量。")
-    else:
-        # 调用函数开始工作
-        get_cf_ips_from_proxy_output(proxy_start_command, max_ips=50, timeout_seconds=180) # 适当增加收集数量和超时时间
+    # 找到匹配的文件后，选择第一个作为要启动的程序
+    # 如果有多个匹配，这里只会选择第一个。如果需要更复杂的逻辑，可以修改这里。
+    proxy_launcher_path = matching_files[0]
+    proxy_command = [os.path.basename(proxy_launcher_path)] # 只需要文件名部分
+    
+    print(f"已找到代理启动器：{proxy_launcher_path}")
+    print(f"将使用命令：{proxy_command} 启动代理程序。")
+
+    # 调用函数开始工作
+    get_cf_ips_from_proxy_output(proxy_command, max_ips=50, timeout_seconds=180)
