@@ -8,9 +8,8 @@ exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
 config_file = "config.yaml"
 
-# 正则匹配 IPv4 和 IPv6（不带端口）
-ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
+# 提取 IPv4 和 IPv6（包括带中括号和端口的 IPv6 地址）
+ip_extract_pattern = re.compile(r"(?:(?P<ipv6>[a-fA-F0-9:]+)|\b(?P<ipv4>(?:\d{1,3}\.){3}\d{1,3})\b)")
 
 current_ip = None
 
@@ -117,12 +116,17 @@ for line in proc.stdout:
     print(line)
 
     if "最佳" in line or "best" in line.lower():
-        # 提取所有 IPv4 和 IPv6 地址
-        ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
-
-        for ip in ips:
-            if ip != current_ip:
-                with open(log_file, "w", encoding="utf-8") as log:
-                    log.write(ip + "\n")
-                current_ip = ip
-                update_cf_dns(ip)
+        # 提取 IP
+        matches = ip_extract_pattern.finditer(line)
+        for match in matches:
+            ip = match.group("ipv6") or match.group("ipv4")
+            if ip and ip != current_ip:
+                try:
+                    # 确保是合法 IP（过滤无效数据）
+                    ipaddress.ip_address(ip)
+                    with open(log_file, "w", encoding="utf-8") as log:
+                        log.write(ip + "\n")
+                    current_ip = ip
+                    update_cf_dns(ip)
+                except ValueError:
+                    continue
