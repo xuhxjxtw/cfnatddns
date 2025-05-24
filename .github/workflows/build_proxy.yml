@@ -24,16 +24,10 @@ jobs:
           pip install pyinstaller requests pyyaml pystray pillow pywin32
 
       - name: Build executable
-        run: |
-          pyinstaller cfnatddns.py ^
-            --onefile ^
-            --noconsole ^
-            --name cfnatddns ^
-            --icon=icon.ico
+        run: pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns --icon=icon.ico
 
       - name: Zip built executable
-        run: |
-          powershell Compress-Archive -Path dist\cfnatddns.exe -DestinationPath cfnatddns.zip
+        run: powershell Compress-Archive -Path dist\cfnatddns.exe -DestinationPath cfnatddns.zip
 
       - name: Upload zip artifact
         uses: actions/upload-artifact@v4
