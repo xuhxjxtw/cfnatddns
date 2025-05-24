@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller dnspython pyyaml
+          pip install pyinstaller dnspython pyyaml requests
 
       - name: Build executable
         run: |
