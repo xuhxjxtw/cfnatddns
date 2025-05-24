@@ -3,18 +3,60 @@ import re
 import yaml
 import requests
 import ipaddress
+import os
+import shutil
+import tempfile
+import sys
+import atexit
+import signal
 
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
 config_file = "config.yaml"
-
-# 匹配 IPv4 和 IPv6 地址
-ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
-
 current_ip = None
 
-# 读取配置文件
+# -------------------- 清理旧的 _MEIxxxx 临时目录 --------------------
+def cleanup_mei_dirs():
+    temp_dir = tempfile.gettempdir()
+    current_dir = getattr(sys, '_MEIPASS', None)
+
+    for item in os.listdir(temp_dir):
+        path = os.path.join(temp_dir, item)
+        if item.startswith("_MEI") and os.path.isdir(path):
+            if current_dir and os.path.abspath(path) == os.path.abspath(current_dir):
+                continue
+            try:
+                shutil.rmtree(path)
+                print(f"[清理] 删除残留: {path}")
+            except Exception as e:
+                print(f"[跳过] 删除失败 {path}: {e}")
+
+cleanup_mei_dirs()
+
+# -------------------- 脚本退出清理 --------------------
+def cleanup_on_exit():
+    if os.path.exists(log_file):
+        try:
+            os.remove(log_file)
+            print("[清理] 已删除日志文件")
+        except Exception as e:
+            print(f"[清理] 删除日志文件失败: {e}")
+
+atexit.register(cleanup_on_exit)
+
+# -------------------- Ctrl+C 信号处理 --------------------
+def signal_handler(sig, frame):
+    print("\n[退出] 收到中断信号，正在退出...")
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# -------------------- 配置读取 --------------------
 try:
     with open(config_file, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -22,12 +64,16 @@ except Exception as e:
     print(f"[错误] 配置读取失败: {e}")
     exit(1)
 
-# 提取 Cloudflare 相关配置
+# Cloudflare 配置
 cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
+
+# -------------------- IP 工具函数 --------------------
+ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
 
 def get_ip_type(ip):
     try:
@@ -86,17 +132,7 @@ def update_cf_dns(ip):
     except Exception as e:
         print(f"[{record_type}] 更新过程异常: {e}")
 
-# 初始化 current_ip
-try:
-    with open(log_file, "r", encoding="utf-8") as log:
-        last_ip = log.read().strip()
-        if last_ip:
-            current_ip = last_ip
-            print(f"[初始化] 上次记录的 IP: {current_ip}")
-except FileNotFoundError:
-    pass
-
-# 启动参数
+# -------------------- 启动 cfnat 子进程 --------------------
 args = [
     exe_name,
     f"-colo={config.get('colo', 'HKG')}",
@@ -106,7 +142,6 @@ args = [
     f"-delay={config.get('delay', 300)}"
 ]
 
-# 启动进程
 try:
     proc = subprocess.Popen(
         args,
@@ -121,7 +156,7 @@ except Exception as e:
     print(f"[错误] 启动失败: {e}")
     exit(1)
 
-# 实时输出读取
+# -------------------- 实时日志解析 --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
@@ -129,7 +164,6 @@ for line in proc.stdout:
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
-            # 过滤时间格式
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
             if ip != current_ip:
