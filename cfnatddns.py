@@ -1,78 +1,139 @@
-import requests
-import logging
-from logging.handlers import RotatingFileHandler
-import socket
+import subprocess
+import re
 import time
+import os
+import datetime
 
-# --- 日志配置 ---
-LOG_FILE_NAME = "cfnatddns.log"
-LOG_LEVEL = "INFO"
+# 定义日志文件名
+LOG_FILE_NAME = "cfnat_ips.log"
 
-def setup_logging(log_file_name, log_level_str):
-    logger = logging.getLogger('cfnatddns_logger')
-    logger.setLevel(logging.DEBUG)
+def get_cf_ips_from_proxy_output(proxy_command, max_ips=20, timeout_seconds=120):
+    """
+    启动代理程序，并从其标准输出中实时提取 Cloudflare IP 地址，并记录到日志文件。
 
-    if logger.handlers:
-        for handler in logger.handlers:
-            logger.removeHandler(handler)
+    Args:
+        proxy_command (list): 启动代理程序的命令，例如 ["./your_proxy_executable"]。
+        max_ips (int): 收集到多少个不同的IP后停止。
+        timeout_seconds (int): 脚本运行的最长时间（秒）。
 
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+    Returns:
+        list: 收集到的 Cloudflare IP 地址列表。
+    """
+    ips_found = set()
+    process = None
+    start_time = time.time()
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    console_handler.setLevel(getattr(logging, log_level_str.upper(), logging.INFO))
-    logger.addHandler(console_handler)
-
-    file_handler = RotatingFileHandler(
-        log_file_name,
-        maxBytes=1024 * 1024 * 5,  # 5MB
-        backupCount=5,
-        encoding='utf-8'
+    # 定义匹配 IPv4 和 IPv6 地址的正则表达式
+    ip_pattern = re.compile(
+        r'\b(?:'
+        r'(?:\d{1,3}\.){3}\d{1,3}'  # IPv4 地址
+        r'|'
+        r'(?:[0-9a-fA-F]{1,4}:){1,7}[0-9a-fA-F]{1,4}'
+        r'|'
+        r'::(?:[0-9a-fA-F]{1,4}){1,7}'
+        r'|'
+        r'[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6})?'
+        r')\b'
     )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
 
-    return logger
-
-logger = setup_logging(LOG_FILE_NAME, LOG_LEVEL)
-
-def get_local_ipv4():
-    """ 获取本机的 IPv4 地址 """
+    # 尝试以追加模式打开日志文件，如果文件不存在则创建
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LOG_FILE_NAME)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 80))  # 任意外部地址，只用于获取本地 IPv4
-        local_ipv4 = s.getsockname()[0]
-        s.close()
-        return local_ipv4
-    except Exception:
-        return "127.0.0.1"  # 如果无法获取，返回默认 IPv4 地址
-
-def send_request(url):
-    """ 发送 HTTP 请求到目标网址，并记录返回结果 """
-    try:
-        logger.info(f"尝试访问 {url}")
-        response = requests.get(url)
-        logger.info(f"响应代码: {response.status_code}")
-        logger.info(f"响应内容: {response.text[:100]}...")  # 只显示前 100 个字符
-        return response
+        log_file = open(log_path, 'a', encoding='utf-8')
+        log_file.write(f"\n[{datetime.datetime.now()}] --- 开始收集 Cloudflare IP --- \n")
+        log_file.flush() # 立即写入
+        print(f"日志将写入到: {log_path}")
     except Exception as e:
-        logger.error(f"请求失败: {e}")
-        return None
+        print(f"错误：无法打开日志文件 {log_path}，将只在控制台输出。错误信息: {e}")
+        log_file = None # 标记为无法写入文件
 
-if __name__ == '__main__':
-    while True:
-        local_ipv4 = get_local_ipv4()
-        logger.info(f"本机内网 IPv4 地址: {local_ipv4}")
+    def log_message(message, to_file=True):
+        """同时打印到控制台和日志文件"""
+        print(message)
+        if to_file and log_file:
+            log_file.write(message + "\n")
+            log_file.flush()
 
-        # 设置目标网站和请求路径
-        server_host = 'cloudflaremirrors.com'
-        path = '/debian'  # 目标路径
-        url = f"http://{server_host}{path}"
+    log_message(f"尝试启动代理程序：{' '.join(proxy_command)}")
 
-        # 使用本机的 IP 地址和端口 1234 访问目标网址
-        logger.info(f"通过本机地址 {local_ipv4}:1234 访问 {url}")
-        send_request(url)
+    try:
+        process = subprocess.Popen(
+            proxy_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            bufsize=1,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
 
-        # 每 10 秒清理一次日志
-        time.sleep(10)
+        log_message(f"开始监听代理服务的输出，最多等待 {timeout_seconds} 秒，或直到收集到 {max_ips} 个IP...")
+
+        while True:
+            if time.time() - start_time > timeout_seconds:
+                log_message(f"已达到最大等待时间 {timeout_seconds} 秒，停止收集。")
+                break
+
+            if len(ips_found) >= max_ips:
+                log_message(f"已收集到 {max_ips} 个不同的IP地址，停止收集。")
+                break
+
+            line = process.stdout.readline()
+            if not line:
+                if process.poll() is not None:
+                    log_message("代理程序已退出。")
+                    break
+                else:
+                    time.sleep(0.1)
+                    continue
+
+            line = line.strip()
+            # log_message(f"原始输出: {line}", to_file=False) # 调试用，原始输出只在控制台打印
+
+            matches = ip_pattern.findall(line)
+            for ip_match in matches:
+                if ip_match and ip_match not in ips_found:
+                    log_message(f"发现 IP: {ip_match}")
+                    ips_found.add(ip_match)
+
+    except FileNotFoundError:
+        log_message(f"错误：找不到可执行文件或脚本。请检查命令是否正确，以及是否在当前目录下。")
+        log_message(f"尝试运行的命令：{' '.join(proxy_command)}")
+    except Exception as e:
+        log_message(f"运行或解析过程中发生错误: {e}")
+    finally:
+        if process and process.poll() is None:
+            log_message("终止代理程序。")
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log_message("强制杀死代理程序。")
+                process.kill()
+        
+        log_message("IP 收集完成。")
+        log_message(f"--- Cloudflare IP 列表 (共 {len(ips_found)} 个) ---")
+        if ips_found:
+            for ip in sorted(list(ips_found)): # 排序后写入，方便查看
+                log_message(ip)
+        else:
+            log_message("未获取到任何 Cloudflare IP 地址。")
+        log_message(f"[{datetime.datetime.now()}] --- 收集结束 --- \n")
+        
+        if log_file:
+            log_file.close() # 关闭日志文件
+    return list(ips_found)
+
+
+# --- 脚本运行入口 ---
+if __name__ == "__main__":
+    # 请确认 'cmd_tray.HKG.exe' 与此 Python 脚本在同一个目录下。
+    proxy_start_command = ["./cmd_tray.HKG.exe"]
+
+    if not os.path.exists(proxy_start_command[0]):
+        print(f"错误：未能找到代理启动器 '{proxy_start_command[0]}'。")
+        print("请确保 'cmd_tray.HKG.exe' 文件与 'cfnatddnd.py' 脚本在同一个目录下。")
+        print("如果文件名不是 'cmd_tray.HKG.exe'，请修改脚本中的 proxy_start_command 变量。")
+    else:
+        # 调用函数开始工作
+        get_cf_ips_from_proxy_output(proxy_start_command, max_ips=50, timeout_seconds=180) # 适当增加收集数量和超时时间
