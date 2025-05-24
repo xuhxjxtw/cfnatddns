@@ -20,15 +20,13 @@ except Exception as e:
     print(f"配置文件加载失败: {e}")
     exit(1)
 
-# 检查可执行文件是否存在
+# 启动程序
 if not os.path.exists(exe_name):
     print(f"{exe_name} 不存在")
     exit(1)
 
-# 打印实际启动命令用于调试
 print("启动命令:", " ".join([exe_name] + arg_list))
 
-# 启动子进程
 try:
     proc = subprocess.Popen(
         [exe_name] + arg_list,
@@ -43,18 +41,16 @@ except Exception as e:
     print(f"启动失败: {e}")
     exit(1)
 
-# 监听输出
+# 监听输出，只保存“选择最佳连接”行
 for line in proc.stdout:
     line = line.strip()
     ipv4s = ipv4_pattern.findall(line)
     ipv6s = ipv6_pattern.findall(line)
 
-    # 打印所有含 IP 的行
     if ipv4s or ipv6s:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] {line}")
 
-    # 只保存最新的“选择最佳连接”行
     if "选择最佳连接" in line:
         with open(log_file, "w", encoding="utf-8") as log:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
