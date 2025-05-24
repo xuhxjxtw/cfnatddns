@@ -22,49 +22,6 @@ except Exception as e:
     print(f"读取配置失败: {e}")
     exit(1)
 
-# Cloudflare 配置
-cf_config = config.get("cloudflare", {})
-cf_email = cf_config.get("email")
-cf_api_key = cf_config.get("api_key")
-cf_zone_id = cf_config.get("zone_id")
-cf_record_name = cf_config.get("record_name")
-
-def update_cloudflare_dns(ip, record_type):
-    """将 IP 同步到 Cloudflare DNS"""
-    headers = {
-        "X-Auth-Email": cf_email,
-        "X-Auth-Key": cf_api_key,
-        "Content-Type": "application/json"
-    }
-
-    # 查找 DNS record ID
-    list_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records?type={record_type}&name={cf_record_name}"
-    resp = requests.get(list_url, headers=headers).json()
-
-    if not resp["success"] or not resp["result"]:
-        print(f"[{record_type}] 获取 DNS 记录失败")
-        return False
-
-    record_id = resp["result"][0]["id"]
-
-    # 更新记录
-    update_url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records/{record_id}"
-    data = {
-        "type": record_type,
-        "name": cf_record_name,
-        "content": ip,
-        "ttl": 120,
-        "proxied": False
-    }
-
-    update_resp = requests.put(update_url, headers=headers, json=data).json()
-    if update_resp["success"]:
-        print(f"[{record_type}] Cloudflare DNS 更新成功: {ip}")
-        return True
-    else:
-        print(f"[{record_type}] Cloudflare DNS 更新失败:", update_resp)
-        return False
-
 # 构造参数
 args = [
     exe_name,
@@ -74,6 +31,61 @@ args = [
     f"-ips={config.get('ips', 6)}",
     f"-delay={config.get('delay', 300)}"
 ]
+
+# Cloudflare 配置
+cf_config = config.get("cloudflare", {})
+cf_email = cf_config.get("email")
+cf_api_key = cf_config.get("api_key")
+cf_zone_id = cf_config.get("zone_id")
+cf_record_name = cf_config.get("record_name")
+
+def update_cf_dns(ip):
+    if not all([cf_email, cf_api_key, cf_zone_id, cf_record_name]):
+        print("Cloudflare 配置不完整，跳过同步")
+        return
+
+    headers = {
+        "X-Auth-Email": cf_email,
+        "X-Auth-Key": cf_api_key,
+        "Content-Type": "application/json"
+    }
+
+    # 查询记录 ID
+    try:
+        r = requests.get(
+            f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records",
+            headers=headers,
+            params={"type": "A", "name": cf_record_name}
+        )
+        result = r.json()
+        if not result["success"] or not result["result"]:
+            print("查询 DNS 记录失败")
+            return
+        record_id = result["result"][0]["id"]
+    except Exception as e:
+        print(f"获取记录 ID 出错: {e}")
+        return
+
+    # 更新记录
+    try:
+        data = {
+            "type": "A",
+            "name": cf_record_name,
+            "content": ip,
+            "ttl": 120,
+            "proxied": False
+        }
+        r = requests.put(
+            f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records/{record_id}",
+            headers=headers,
+            json=data
+        )
+        if r.status_code == 200 and r.json().get("success"):
+            print(f"Cloudflare DNS 已更新为: {ip}")
+        else:
+            print(f"DNS 更新失败: {r.text}")
+    except Exception as e:
+        print(f"更新 DNS 出错: {e}")
 
 # 启动进程
 try:
@@ -93,22 +105,13 @@ except Exception as e:
 # 实时监控输出
 for line in proc.stdout:
     line = line.strip()
-    print(line)
+    print(line)  # 控制台完整输出
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
             if ip != current_ip:
-                current_ip = ip
-                record_type = "A" if ipv4_pattern.fullmatch(ip) else "AAAA"
-                sync_success = False
-
-                if cf_email and cf_api_key and cf_zone_id and cf_record_name:
-                    sync_success = update_cloudflare_dns(ip, record_type)
-
-                # 写日志，第一行是 IP，第二行是状态
+                # 覆盖写入最新 IP
                 with open(log_file, "w", encoding="utf-8") as log:
                     log.write(ip + "\n")
-                    if sync_success:
-                        log.write("Cloudflare 已同步\n")
-                    else:
-                        log.write("Cloudflare 同步失败\n")
+                current_ip = ip
+                update_cf_dns(ip)
