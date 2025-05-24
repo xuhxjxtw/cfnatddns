@@ -46,15 +46,15 @@ except Exception as e:
     print(f"启动失败: {e}")
     exit(1)
 
-# 实时监控输出并只保留最新 IP
+# 实时监控输出
 for line in proc.stdout:
     line = line.strip()
+    print(line)  # 控制台完整输出
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
             if ip != current_ip:
-                # 写入新的 IP，替换掉旧内容
+                # 覆盖写入最新 IP
                 with open(log_file, "w", encoding="utf-8") as log:
                     log.write(ip + "\n")
-                print(ip)
                 current_ip = ip
