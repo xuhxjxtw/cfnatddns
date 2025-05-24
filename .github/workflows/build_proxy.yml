@@ -20,19 +20,16 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: |
-          pip install pyinstaller pyyaml
+        run: pip install pyinstaller pyyaml requests
 
-      - name: Build executable
+      - name: Build EXE
         run: pyinstaller cfnatddns.py --onefile --noconsole --name cfnatddns
 
-      - name: Zip EXE + YAML
-        run: |
-          copy config.yaml dist\
-          powershell Compress-Archive -Path dist\* -DestinationPath cfnatddns_bundle.zip
+      - name: Zip EXE only
+        run: powershell Compress-Archive -Path dist\cfnatddns.exe -DestinationPath cfnatddns.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cfnatddns_bundle
-          path: cfnatddns_bundle.zip
+          name: cfnatddns_exe
+          path: cfnatddns.zip
