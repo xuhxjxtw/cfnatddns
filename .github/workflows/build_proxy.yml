@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller requests pyyaml
+          pip install pyinstaller requests pyyaml pystray pillow
 
       - name: Build executable
         run: |
