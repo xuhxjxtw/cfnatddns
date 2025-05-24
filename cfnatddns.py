@@ -44,32 +44,31 @@ def update_cf_dns(ip):
         print("Cloudflare 配置不完整，跳过同步")
         return
 
+    record_type = "A" if ":" not in ip else "AAAA"
+
     headers = {
         "X-Auth-Email": cf_email,
         "X-Auth-Key": cf_api_key,
         "Content-Type": "application/json"
     }
 
-    # 查询记录 ID
     try:
+        # 查询记录 ID
         r = requests.get(
             f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records",
             headers=headers,
-            params={"type": "A", "name": cf_record_name}
+            params={"type": record_type, "name": cf_record_name}
         )
         result = r.json()
         if not result["success"] or not result["result"]:
-            print("查询 DNS 记录失败")
+            print(f"[{record_type}] 查询 DNS 记录失败: {result.get('errors')}")
             return
-        record_id = result["result"][0]["id"]
-    except Exception as e:
-        print(f"获取记录 ID 出错: {e}")
-        return
 
-    # 更新记录
-    try:
+        record_id = result["result"][0]["id"]
+
+        # 更新记录
         data = {
-            "type": "A",
+            "type": record_type,
             "name": cf_record_name,
             "content": ip,
             "ttl": 120,
@@ -81,11 +80,11 @@ def update_cf_dns(ip):
             json=data
         )
         if r.status_code == 200 and r.json().get("success"):
-            print(f"Cloudflare DNS 已更新为: {ip}")
+            print(f"[{record_type}] Cloudflare DNS 已更新为: {ip}")
         else:
-            print(f"DNS 更新失败: {r.text}")
+            print(f"[{record_type}] DNS 更新失败: {r.text}")
     except Exception as e:
-        print(f"更新 DNS 出错: {e}")
+        print(f"[{record_type}] 更新 DNS 出错: {e}")
 
 # 启动进程
 try:
