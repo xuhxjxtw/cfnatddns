@@ -1,8 +1,11 @@
-args:
-  - -colo=HKG
-  - -port
-  - "8443"
-  - -addr
-  - "0.0.0.0:1238"
-  - -ips=6
-  - -delay=300
+colo: HKG
+port: 8443
+addr: "0.0.0.0:1236"
+ips: 6
+delay: 300
+
+cloudflare:
+  email: "onccccccvv@gmail.com"
+  api_key: "5b44f3403ae75a53753f2533675a5756"
+  zone_id: "5a36aed5de512ba019386e48b7a"
+  record_name: "xxxxxxxx.nyc.mn"
