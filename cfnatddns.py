@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 exe_name = "cfnat-windows-amd64.exe"
-config_file = "config.yaml"
+config_file = "confing.yaml"
 log_file = "cfnat_log.txt"
 
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
