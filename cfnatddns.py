@@ -10,8 +10,8 @@ config_file = "config.yaml"
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
 
-# 已记录地址
-logged_ips = set()
+# 当前已记录的 IP
+current_ip = None
 
 # 读取配置
 try:
@@ -46,15 +46,15 @@ except Exception as e:
     print(f"启动失败: {e}")
     exit(1)
 
-# 只记录新出现的 IP 地址（无其他内容）
-with open(log_file, "a", encoding="utf-8") as log:
-    for line in proc.stdout:
-        line = line.strip()
-        if "最佳" in line or "best" in line.lower():
-            ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
-            for ip in ips:
-                if ip not in logged_ips:
+# 实时监控输出并只保留最新 IP
+for line in proc.stdout:
+    line = line.strip()
+    if "最佳" in line or "best" in line.lower():
+        ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
+        for ip in ips:
+            if ip != current_ip:
+                # 写入新的 IP，替换掉旧内容
+                with open(log_file, "w", encoding="utf-8") as log:
                     log.write(ip + "\n")
-                    log.flush()
-                    print(ip)
-                    logged_ips.add(ip)
+                print(ip)
+                current_ip = ip
