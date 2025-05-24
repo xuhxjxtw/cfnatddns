@@ -29,7 +29,12 @@ jobs:
           pyinstaller cfupload.py  --onefile --noconsole --name cfupload
           pyinstaller ipfilter.py  --onefile --noconsole --name ipfilter
 
-      - name: Zip all executables
+      - name: Copy config files
+        run: |
+          mkdir dist\config
+          copy *.yaml dist\config\
+
+      - name: Zip all executables and config
         run: powershell Compress-Archive -Path dist\* -DestinationPath proxy_tools_bundle.zip
 
       - name: Upload zip artifact
