@@ -38,8 +38,6 @@ jobs:
           mkdir dist_bundle
           # Copy the generated executable from the 'dist' folder
           copy dist\cfnatddns.exe dist_bundle\cfnatddns.exe
-          # Copy the config.yaml file into the bundle directory
-          copy config.yaml dist_bundle\config.yaml
 
       - name: Zip output bundle
         run: |
