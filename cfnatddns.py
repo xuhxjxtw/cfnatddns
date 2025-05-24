@@ -1,68 +1,37 @@
 import subprocess
+import re
 import os
-import time
-import datetime
+from datetime import datetime
 
-# --- 配置部分 ---
-LAUNCHER_NAME = "cmd_tray-HKG.exe"
-IP_FILE_NAME = "ips-v4"
-LOG_FILE_NAME = "cfnat_ips.log"
-MAX_WAIT_SECONDS = 180  # 最多等待 180 秒生成 IP 文件
+# 设置程序名和日志文件名
+exe_name = "cmd_tray-HKG.exe"
+log_file = "cfnat_log.txt"
 
-def launch_gui_launcher(launcher_path):
-    """启动 cmd_tray-HKG 启动器"""
-    print(f"启动启动器：{launcher_path}")
-    try:
-        subprocess.Popen([launcher_path], cwd=os.path.dirname(launcher_path))
-        print("启动器已启动。")
-    except Exception as e:
-        print(f"启动失败：{e}")
-        exit(1)
+# 正则匹配 IPv4 和 IPv6
+ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+ipv6_pattern = re.compile(r"\b([a-fA-F0-9:]{2,})\b")
 
-def wait_for_ip_file(ip_file_path, timeout=180):
-    """等待 IP 文件生成"""
-    print(f"等待 IP 文件：{ip_file_path}")
-    start_time = time.time()
-    while not os.path.exists(ip_file_path):
-        if time.time() - start_time > timeout:
-            print(f"等待超时：{timeout} 秒未生成 {ip_file_path}")
-            return False
-        time.sleep(2)
-    return True
+# 打开 EXE 程序
+proc = subprocess.Popen(
+    [exe_name],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
+    universal_newlines=True
+)
 
-def extract_ips(ip_file_path):
-    """读取并返回唯一 IP 列表"""
-    with open(ip_file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-    ips = sorted(set(line.strip() for line in lines if line.strip()))
-    return ips
+# 开始实时监控并记录日志
+with open(log_file, "a", encoding="utf-8") as log:
+    log.write(f"\n\n--- 日志开始于 {datetime.now()} ---\n")
+    for line in proc.stdout:
+        line = line.strip()
+        ipv4s = ipv4_pattern.findall(line)
+        ipv6s = ipv6_pattern.findall(line)
+        if ipv4s or ipv6s:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log.write(f"[{timestamp}] {line}\n")
+            log.flush()
+        print(line)
 
-def log_ips(ips, log_file_path):
-    """写入日志"""
-    with open(log_file_path, 'a', encoding='utf-8') as log_file:
-        log_file.write(f"\n[{datetime.datetime.now()}] --- 提取到 {len(ips)} 个 IP ---\n")
-        for ip in ips:
-            log_file.write(ip + '\n')
-        log_file.write(f"[{datetime.datetime.now()}] --- 结束 ---\n")
-    print(f"已写入 {len(ips)} 个 IP 到日志文件：{log_file_path}")
-
-# --- 主程序入口 ---
-if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    launcher_path = os.path.join(script_dir, LAUNCHER_NAME)
-    ip_file_path = os.path.join(script_dir, IP_FILE_NAME)
-    log_file_path = os.path.join(script_dir, LOG_FILE_NAME)
-
-    # 步骤 1：启动启动器
-    launch_gui_launcher(launcher_path)
-
-    # 步骤 2：等待 IP 文件并读取
-    if wait_for_ip_file(ip_file_path, MAX_WAIT_SECONDS):
-        ip_list = extract_ips(ip_file_path)
-        if ip_list:
-            print(f"成功提取 {len(ip_list)} 个 IP。")
-            log_ips(ip_list, log_file_path)
-        else:
-            print("IP 文件存在但没有有效 IP。")
-    else:
-        print("未能找到 IP 文件，终止。")
+# 提示：请确保 cmd_tray-HKG.exe 在同一目录下且为可执行文件。
