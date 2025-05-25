@@ -18,17 +18,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller pyyaml requests
+          pip install pyinstaller pyyaml requests pystray pillow pywin32
 
       - name: Build executable
         run: |
-          pyinstaller cfnatddns.py --onefile --name cfnatddns --hidden-import=yaml
+          pyinstaller cfnatddns.py --onefile --name cfnatddns --icon=icon.ico --hidden-import=yaml
 
       - name: Prepare bundle directory
         run: |
           mkdir dist_bundle
           copy dist\cfnatddns.exe dist_bundle\
           copy config.yaml dist_bundle\
+          copy icon.ico dist_bundle\
 
       - name: Zip bundle
         run: powershell Compress-Archive -Path dist_bundle\* -DestinationPath cfnatddns.zip
