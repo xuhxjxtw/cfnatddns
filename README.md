@@ -13,3 +13,7 @@ DNS绑定域名
 生效后，将节点配置中的IP替换为优选域名，其他参数不变。
 ![image](https://img.picui.cn/free/2025/05/25/68320ef5a23d3.jpg)
 ![image](https://img.picui.cn/free/2025/05/25/68320ef5d63d4.jpg)
+
+最后一次更新，以后没得更新了。
+
+打包好的下载地址:https://wwss.lanzouq.com/iAlx62x75l9i
