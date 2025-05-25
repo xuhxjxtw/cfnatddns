@@ -117,7 +117,7 @@ def update_cf_dns(ip):
             "type": record_type,
             "name": cf_record_name,
             "content": ip,
-            "ttl": 120,
+            "ttl": 1,
             "proxied": False
         }
 
