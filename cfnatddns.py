@@ -220,7 +220,7 @@ def tray_icon():
 
     menu = (
         item('显示/隐藏', on_show_hide),
-        item('完整/退出', on_exit)
+        item('控制台退出', on_exit)
     )
     icon = pystray.Icon("cfnat", image, "cfnat", menu)
     icon.run()
