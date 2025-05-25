@@ -137,8 +137,8 @@ args = [
     exe_name,
     f"-colo={config.get('colo', 'HKG')}",
     f"-port={config.get('port', 8443)}",
-    f"-addr={config.get('addr', '0.0.0.0:1236')}",
-    f"-ips={config.get('ips', 6)}",
+    f"-addr={config.get('addr', '0.0.0.0:1234')}",
+    f"-ips={config.get('ips', 4)}",
     f"-delay={config.get('delay', 300)}"
 ]
 
