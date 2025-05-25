@@ -4,6 +4,10 @@ addr: "0.0.0.0:1236"
 ips: 6
 delay: 300
 
+telegram:
+  bot_token: "你的BotToken"
+  chat_id: "你的ChatID"
+  
 cloudflare:
   email: "onccccccvv@gmail.com"
   api_key: "5b44f3403ae75a53753f2533675a5756"
