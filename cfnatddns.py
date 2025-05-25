@@ -26,6 +26,7 @@ current_ip = None
 def cleanup_mei_dirs():
     temp_dir = tempfile.gettempdir()
     current_dir = getattr(sys, '_MEIPASS', None)
+
     for item in os.listdir(temp_dir):
         path = os.path.join(temp_dir, item)
         if item.startswith("_MEI") and os.path.isdir(path):
@@ -77,11 +78,6 @@ cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
 
-# Telegram 配置
-tg_conf = config.get("telegram", {})
-tg_bot_token = tg_conf.get("bot_token")
-tg_chat_id = tg_conf.get("chat_id")
-
 # -------------------- IP 工具函数 --------------------
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
@@ -93,26 +89,6 @@ def get_ip_type(ip):
     except ValueError:
         return None
 
-# -------------------- Telegram 通知 --------------------
-def send_telegram_message(message):
-    if not tg_bot_token or not tg_chat_id:
-        print("[通知] 未配置 Telegram，跳过发送")
-        return
-    url = f"https://api.telegram.org/bot{tg_bot_token}/sendMessage"
-    data = {
-        "chat_id": tg_chat_id,
-        "text": message
-    }
-    try:
-        resp = requests.post(url, data=data)
-        if resp.status_code != 200:
-            print(f"[通知] Telegram 发送失败: {resp.text}")
-        else:
-            print("[通知] Telegram 消息已发送")
-    except Exception as e:
-        print(f"[通知] 发送失败: {e}")
-
-# -------------------- 更新 Cloudflare DNS --------------------
 def update_cf_dns(ip):
     record_type = get_ip_type(ip)
     if not record_type:
@@ -120,7 +96,6 @@ def update_cf_dns(ip):
         return
 
     other_type = "AAAA" if record_type == "A" else "A"
-    colo_name = config.get("colo", "未知")
 
     headers = {
         "X-Auth-Email": cf_email,
@@ -130,7 +105,7 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除旧类型记录
+    # 删除旧类型的记录
     try:
         del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
@@ -140,18 +115,20 @@ def update_cf_dns(ip):
                 record_id = record["id"]
                 del_url = f"{url}/{record_id}"
                 d = requests.delete(del_url, headers=headers)
-                print(f"[清除] 删除旧 {other_type} 记录: {record['content']}")
+                print(f"[清除] 已删除旧 {other_type} 记录: {record['content']}")
+        else:
+            print(f"[{other_type}] 查询记录失败（准备删除）: {del_result}")
     except Exception as e:
         print(f"[{other_type}] 删除过程异常: {e}")
 
-    # 更新或创建当前类型记录
+    # 更新或添加当前类型记录
     try:
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
         result = resp.json()
 
         if not result.get("success"):
-            print(f"[{record_type}] 查询失败: {result}")
+            print(f"[{record_type}] 查询 DNS 记录失败: {result}")
             return
 
         records = result.get("result", [])
@@ -166,23 +143,29 @@ def update_cf_dns(ip):
                 "proxied": False
             }
             update_resp = requests.put(update_url, headers=headers, json=data)
-            if update_resp.json().get("success"):
-                print(f"[{record_type}] DNS 更新成功: {ip}")
-                send_telegram_message(f"{colo_name}: {ip} 已同步到 Cloudflare")
+            update_result = update_resp.json()
+
+            if update_result.get("success"):
+                print(f"[{record_type}] Cloudflare DNS 更新成功: {ip}")
+            else:
+                print(f"[{record_type}] Cloudflare DNS 更新失败: {update_result}")
         else:
-            data = {
+            # 没有记录则创建
+            create_data = {
                 "type": record_type,
                 "name": cf_record_name,
                 "content": ip,
                 "ttl": 1,
                 "proxied": False
             }
-            create_resp = requests.post(url, headers=headers, json=data)
-            if create_resp.json().get("success"):
-                print(f"[{record_type}] DNS 创建成功: {ip}")
-                send_telegram_message(f"{colo_name}: {ip} 已添加到 Cloudflare")
+            create_resp = requests.post(url, headers=headers, json=create_data)
+            create_result = create_resp.json()
+            if create_result.get("success"):
+                print(f"[{record_type}] Cloudflare DNS 创建成功: {ip}")
+            else:
+                print(f"[{record_type}] Cloudflare DNS 创建失败: {create_result}")
     except Exception as e:
-        print(f"[{record_type}] 更新异常: {e}")
+        print(f"[{record_type}] 更新过程异常: {e}")
 
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [
@@ -208,7 +191,7 @@ except Exception as e:
     print(f"[错误] 启动失败: {e}")
     exit(1)
 
-# -------------------- 系统托盘图标 --------------------
+# -------------------- 启动系统托盘图标 --------------------
 console_hwnd = win32console.GetConsoleWindow()
 
 def toggle_console():
