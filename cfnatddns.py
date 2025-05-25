@@ -9,6 +9,13 @@ import tempfile
 import sys
 import atexit
 import signal
+import threading
+from PIL import Image
+import pystray
+from pystray import MenuItem as item
+import win32gui
+import win32con
+import win32console
 
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
@@ -155,6 +162,43 @@ try:
 except Exception as e:
     print(f"[错误] 启动失败: {e}")
     exit(1)
+
+# -------------------- 启动系统托盘图标 --------------------
+console_hwnd = win32console.GetConsoleWindow()
+
+def toggle_console():
+    if win32gui.IsWindowVisible(console_hwnd):
+        win32gui.ShowWindow(console_hwnd, win32con.SW_HIDE)
+    else:
+        win32gui.ShowWindow(console_hwnd, win32con.SW_SHOW)
+
+def on_show_hide(icon, item):
+    toggle_console()
+
+def on_exit(icon, item):
+    icon.stop()
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    os._exit(0)
+
+def tray_icon():
+    try:
+        image = Image.open("icon.ico")
+    except Exception as e:
+        print(f"[错误] 无法加载托盘图标: {e}")
+        return
+
+    menu = (
+        item('显示/隐藏控制台', on_show_hide),
+        item('退出', on_exit)
+    )
+    icon = pystray.Icon("cfnat", image, "cfnat", menu)
+    icon.run()
+
+tray_thread = threading.Thread(target=tray_icon, daemon=True)
+tray_thread.start()
 
 # -------------------- 实时日志解析 --------------------
 for line in proc.stdout:
