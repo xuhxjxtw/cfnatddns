@@ -16,4 +16,4 @@ DNS绑定域名
 
 最后一次更新，以后没得更新了。
 
-打包好的下载地址:https://wwss.lanzouq.com/iAlx62x75l9i
+打包好的下载地址:https://wwss.lanzouq.com/iMWRe2x7a4li
