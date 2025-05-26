@@ -168,14 +168,12 @@ def update_cf_dns(ip):
         print(f"[{record_type}] 更新过程异常: {e}")
 
 # -------------------- 启动 cfnat 子进程 --------------------
-args = [
-    exe_name,
-    f"-colo={config.get('colo', 'HKG')}",
-    f"-port={config.get('port', 8443)}",
-    f"-addr={config.get('addr', '0.0.0.0:1234')}",
-    f"-ips={config.get('ips', 4)}",
-    f"-delay={config.get('delay', 300)}"
-]
+args = [exe_name]
+for key, value in config.items():
+    # 跳过 cloudflare 区段
+    if key == "cloudflare":
+        continue
+    args.append(f"-{key}={value}")
 
 try:
     proc = subprocess.Popen(
