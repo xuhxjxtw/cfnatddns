@@ -95,8 +95,6 @@ def update_cf_dns(ip):
         print(f"[跳过] 非法 IP 地址: {ip}")
         return
 
-    other_type = "AAAA" if record_type == "A" else "A"
-
     headers = {
         "X-Auth-Email": cf_email,
         "X-Auth-Key": cf_api_key,
@@ -105,24 +103,8 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除旧类型记录
     try:
-        del_params = {"type": other_type, "name": cf_record_name}
-        del_resp = requests.get(url, headers=headers, params=del_params)
-        del_result = del_resp.json()
-        if del_result.get("success"):
-            for record in del_result.get("result", []):
-                record_id = record["id"]
-                del_url = f"{url}/{record_id}"
-                d = requests.delete(del_url, headers=headers)
-                print(f"[清除] 已删除旧 {other_type} 记录: {record['content']}")
-        else:
-            print(f"[{other_type}] 查询记录失败（准备删除）: {del_result}")
-    except Exception as e:
-        print(f"[{other_type}] 删除过程异常: {e}")
-
-    # 删除当前类型下非目标 IP 的旧记录，只保留当前 IP
-    try:
+        # 查询当前类型记录
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
         result = resp.json()
@@ -132,21 +114,27 @@ def update_cf_dns(ip):
             return
 
         records = result.get("result", [])
+        found = False
 
+        # 删除所有同类型旧记录，保留新 IP
         for record in records:
-            if record["content"] != ip:
-                try:
-                    del_url = f"{url}/{record['id']}"
-                    requests.delete(del_url, headers=headers)
-                    print(f"[清除] 删除旧 {record_type} 记录: {record['content']}")
-                except Exception as e:
-                    print(f"[跳过] 删除多余记录失败: {e}")
+            record_id = record["id"]
+            content = record["content"]
+            if content == ip:
+                found = True
+                continue
+            del_url = f"{url}/{record_id}"
+            try:
+                requests.delete(del_url, headers=headers)
+                print(f"[清除] 删除旧 {record_type} 记录: {content}")
+            except Exception as e:
+                print(f"[清除] 删除失败: {e}")
 
-        for record in records:
-            if record["content"] == ip:
-                print(f"[{record_type}] 已存在正确记录，无需更新: {ip}")
-                return
+        if found:
+            print(f"[{record_type}] 当前 IP 已存在，无需更新: {ip}")
+            return
 
+        # 添加新记录
         create_data = {
             "type": record_type,
             "name": cf_record_name,
@@ -157,9 +145,10 @@ def update_cf_dns(ip):
         create_resp = requests.post(url, headers=headers, json=create_data)
         create_result = create_resp.json()
         if create_result.get("success"):
-            print(f"[{record_type}] Cloudflare DNS 创建成功: {ip}")
+            print(f"[{record_type}] 创建新记录成功: {ip}")
         else:
-            print(f"[{record_type}] Cloudflare DNS 创建失败: {create_result}")
+            print(f"[{record_type}] 创建新记录失败: {create_result}")
+
     except Exception as e:
         print(f"[{record_type}] 更新过程异常: {e}")
 
@@ -196,7 +185,7 @@ except Exception as e:
     print(f"[错误] 启动失败: {e}")
     exit(1)
 
-# -------------------- 启动系统托盘图标 --------------------
+# -------------------- 系统托盘图标 --------------------
 console_hwnd = win32console.GetConsoleWindow()
 
 def toggle_console():
@@ -235,7 +224,7 @@ def tray_icon():
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
 tray_thread.start()
 
-# -------------------- 实时日志解析 --------------------
+# -------------------- 实时日志监控 --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
