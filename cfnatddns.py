@@ -109,6 +109,10 @@ def update_cf_dns(ip):
         return
 
     other_type = "AAAA" if record_type == "A" else "A"
+    if ip_cache[other_type]:
+        print(f"[切换] IP 类型切换，清空旧 {other_type} 缓存")
+        ip_cache[other_type] = []
+        save_ip_log()
 
     headers = {
         "X-Auth-Email": cf_email,
@@ -118,7 +122,6 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除其他类型记录
     try:
         del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
@@ -132,7 +135,6 @@ def update_cf_dns(ip):
     except Exception as e:
         print(f"[{other_type}] 删除异常: {e}")
 
-    # 当前类型记录，先获取现有
     try:
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
@@ -142,13 +144,11 @@ def update_cf_dns(ip):
         existing_ips = {r["content"]: r["id"] for r in existing}
         desired_ips = ip_cache[record_type]
 
-        # 删除不在列表里的旧 IP
         for ip_val, r_id in existing_ips.items():
             if ip_val not in desired_ips:
                 requests.delete(f"{url}/{r_id}", headers=headers)
                 print(f"[同步] 删除多余 {record_type} IP: {ip_val}")
 
-        # 添加或更新期望 IP
         for ip_val in desired_ips:
             if ip_val in existing_ips:
                 continue
@@ -223,7 +223,7 @@ def tray_icon():
         print(f"[错误] 无法加载托盘图标: {e}")
         return
 
-    menu = (item('显示/隐藏', on_show_hide), item('控制台退出', on_exit))
+    menu = (item('显示/隐藏', on_show_hide), item('退出', on_exit))
     icon = pystray.Icon("cfnat", image, "cfnat", menu)
     icon.run()
 
