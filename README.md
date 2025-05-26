@@ -16,8 +16,9 @@ DNS绑定域名
 
 最后一次更新，以后没得更新了。
 完全模拟本地:
-打包好的下载地址:https://wwss.lanzouq.com/iMWRe2x7a4li
+打包好的下载地址:
+https://wwss.lanzouq.com/iMWRe2x7a4li
 
 
-增加一个支持多个dns:直接同步。
+增加一个支持自定义多个dns直接同步：
 https://wwss.lanzouq.com/iNUqZ2xa38li
