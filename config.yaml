@@ -12,3 +12,4 @@ cloudflare:
   api_key: "5b44f3403ae75a53753f2533675a5756"
   zone_id: "5a36aed5de512ba019386e48b7a"
   record_name: "xxxxxxxx.nyc.mn"
+  sync_count: 2  # 每种类型（A/AAAA）设置最多保留几个 IP 默认2个。
