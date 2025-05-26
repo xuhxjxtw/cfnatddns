@@ -4,7 +4,6 @@ import yaml
 import requests
 import ipaddress
 import os
-import shutil
 import tempfile
 import sys
 import atexit
@@ -20,7 +19,7 @@ import win32console
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
 config_file = "config.yaml"
-current_ip = None
+ip_cache = {"A": [], "AAAA": []}
 
 # -------------------- 清理旧的 _MEIxxxx 临时目录 --------------------
 def cleanup_mei_dirs():
@@ -60,13 +59,12 @@ except Exception as e:
     print(f"[错误] 配置读取失败: {e}")
     exit(1)
 
-# Cloudflare 配置
+sync_count = config.get("sync_count", 1)
 cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
-sync_count = config.get("sync_count", 2)
 
 # -------------------- IP 工具函数 --------------------
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -79,42 +77,12 @@ def get_ip_type(ip):
     except ValueError:
         return None
 
-def load_ip_log():
-    ip_dict = {"A": [], "AAAA": []}
-    if not os.path.exists(log_file):
-        return ip_dict
-    with open(log_file, "r", encoding="utf-8") as f:
-        for line in f:
-            ip = line.strip()
-            record_type = get_ip_type(ip)
-            if record_type:
-                ip_dict[record_type].append(ip)
-    return ip_dict
-
-def save_ip_log(ip_dict):
-    with open(log_file, "w", encoding="utf-8") as f:
-        for ip in ip_dict["A"] + ip_dict["AAAA"]:
-            f.write(ip + "\n")
-
 def update_cf_dns(ip):
     record_type = get_ip_type(ip)
     if not record_type:
-        print(f"[跳过] 非法 IP: {ip}")
+        print(f"[跳过] 非法 IP 地址: {ip}")
         return
 
-    ip_dict = load_ip_log()
-    if ip in ip_dict[record_type]:
-        print(f"[跳过] {record_type} IP 已存在: {ip}")
-        return
-
-    ip_dict[record_type].append(ip)
-    if len(ip_dict[record_type]) > sync_count:
-        removed = ip_dict[record_type].pop(0)
-        print(f"[日志] 超出数量，移除最旧 IP: {removed}")
-
-    save_ip_log(ip_dict)
-
-    # Cloudflare 同步
     headers = {
         "X-Auth-Email": cf_email,
         "X-Auth-Key": cf_api_key,
@@ -123,59 +91,57 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
+    # 获取当前记录
     try:
-        # 删除原有记录
-        resp = requests.get(url, headers=headers, params={"type": record_type, "name": cf_record_name})
-        for record in resp.json().get("result", []):
-            requests.delete(f"{url}/{record['id']}", headers=headers)
+        params = {"type": record_type, "name": cf_record_name}
+        resp = requests.get(url, headers=headers, params=params)
+        result = resp.json()
 
-        # 添加当前 IP 列表
-        for ip_item in ip_dict[record_type]:
-            data = {
-                "type": record_type,
-                "name": cf_record_name,
-                "content": ip_item,
-                "ttl": 1,
-                "proxied": False
-            }
-            resp = requests.post(url, headers=headers, json=data)
-            if resp.json().get("success"):
-                print(f"[{record_type}] 添加成功: {ip_item}")
-            else:
-                print(f"[{record_type}] 添加失败: {resp.json()}")
+        if not result.get("success"):
+            print(f"[{record_type}] 查询 DNS 记录失败: {result}")
+            return
+
+        current_records = result.get("result", [])
+        current_ips = [r["content"] for r in current_records]
+
+        # 删除多余的记录
+        for record in current_records:
+            if record["content"] not in ip_cache[record_type]:
+                del_url = f"{url}/{record['id']}"
+                requests.delete(del_url, headers=headers)
+                print(f"[清理] 删除 Cloudflare 上旧 IP: {record['content']}")
+
+        # 添加新 IP（如果不在 Cloudflare 上）
+        for cached_ip in ip_cache[record_type]:
+            if cached_ip not in current_ips:
+                create_data = {
+                    "type": record_type,
+                    "name": cf_record_name,
+                    "content": cached_ip,
+                    "ttl": 1,
+                    "proxied": False
+                }
+                resp = requests.post(url, headers=headers, json=create_data)
+                result = resp.json()
+                if result.get("success"):
+                    print(f"[{record_type}] 添加成功: {cached_ip}")
+                else:
+                    print(f"[{record_type}] 添加失败: {result}")
     except Exception as e:
-        print(f"[{record_type}] Cloudflare 更新异常: {e}")
+        print(f"[{record_type}] 同步异常: {e}")
 
-# -------------------- 启动 cfnat 子进程 --------------------
-args = [exe_name]
-optional_args = {
-    "colo": "-colo=",
-    "port": "-port=",
-    "addr": "-addr=",
-    "ips": "-ips=",
-    "delay": "-delay=",
-    "ipnum": "-ipnum=",
-    "num": "-num=",
-    "task": "-task="
-}
-for key, flag in optional_args.items():
-    value = config.get(key)
-    if value is not None:
-        args.append(f"{flag}{value}")
+# -------------------- IP 缓存加载 --------------------
+def load_ip_cache():
+    if not os.path.exists(log_file):
+        return
+    with open(log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            ip = line.strip()
+            rtype = get_ip_type(ip)
+            if rtype and ip not in ip_cache[rtype]:
+                ip_cache[rtype].append(ip)
 
-try:
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        bufsize=1
-    )
-except Exception as e:
-    print(f"[错误] 启动失败: {e}")
-    exit(1)
+load_ip_cache()
 
 # -------------------- 托盘图标 --------------------
 console_hwnd = win32console.GetConsoleWindow()
@@ -186,15 +152,11 @@ def toggle_console():
     else:
         win32gui.ShowWindow(console_hwnd, win32con.SW_SHOW)
 
-def on_show_hide(icon, item):
-    toggle_console()
-
+def on_show_hide(icon, item): toggle_console()
 def on_exit(icon, item):
     icon.stop()
-    try:
-        proc.terminate()
-    except Exception:
-        pass
+    try: proc.terminate()
+    except: pass
     os._exit(0)
 
 def tray_icon():
@@ -203,25 +165,49 @@ def tray_icon():
     except Exception as e:
         print(f"[错误] 无法加载托盘图标: {e}")
         return
-
-    menu = (
-        item('显示/隐藏', on_show_hide),
-        item('控制台退出', on_exit)
-    )
+    menu = (item('显示/隐藏', on_show_hide), item('控制台退出', on_exit))
     icon = pystray.Icon("cfnat", image, "cfnat", menu)
     icon.run()
 
-tray_thread = threading.Thread(target=tray_icon, daemon=True)
-tray_thread.start()
+threading.Thread(target=tray_icon, daemon=True).start()
 
-# -------------------- 实时日志处理 --------------------
+# -------------------- 启动子进程 --------------------
+args = [exe_name]
+optional_args = {
+    "colo": "-colo=", "port": "-port=", "addr": "-addr=", "ips": "-ips=",
+    "delay": "-delay=", "ipnum": "-ipnum=", "num": "-num=", "task": "-task="
+}
+for key, flag in optional_args.items():
+    value = config.get(key)
+    if value is not None:
+        args.append(f"{flag}{value}")
+
+try:
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="ignore", bufsize=1)
+except Exception as e:
+    print(f"[错误] 启动失败: {e}")
+    exit(1)
+
+# -------------------- 实时日志监控 --------------------
+def save_ip_log():
+    with open(log_file, "w", encoding="utf-8") as f:
+        for rtype in ["A", "AAAA"]:
+            for ip in ip_cache[rtype]:
+                f.write(ip + "\n")
+
 for line in proc.stdout:
     line = line.strip()
     print(line)
-
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
-            if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
+            rtype = get_ip_type(ip)
+            if not rtype:
                 continue
-            update_cf_dns(ip)
+            if ip not in ip_cache[rtype]:
+                ip_cache[rtype].insert(0, ip)
+                ip_cache[rtype] = ip_cache[rtype][:sync_count]
+                print(f"[更新] 新 IP 加入缓存: {ip}")
+                save_ip_log()
+                update_cf_dns(ip)
