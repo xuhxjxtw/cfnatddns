@@ -223,8 +223,9 @@ def tray_icon():
         print(f"[错误] 无法加载托盘图标: {e}")
         return
 
+    tray_title = os.path.basename(sys.argv[0])
     menu = (item('显示/隐藏', on_show_hide), item('控制台退出', on_exit))
-    icon = pystray.Icon("cfnat", image, exe_name, menu)
+    icon = pystray.Icon("cfnat", image, tray_title, menu)
     icon.run()
 
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
