@@ -105,7 +105,7 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除旧类型的记录
+    # 删除旧类型记录
     try:
         del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
@@ -121,7 +121,7 @@ def update_cf_dns(ip):
     except Exception as e:
         print(f"[{other_type}] 删除过程异常: {e}")
 
-    # 更新或添加当前类型记录
+    # 删除当前类型下非目标 IP 的旧记录，只保留当前 IP
     try:
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
@@ -132,37 +132,34 @@ def update_cf_dns(ip):
             return
 
         records = result.get("result", [])
-        if records:
-            record_id = records[0]["id"]
-            update_url = f"{url}/{record_id}"
-            data = {
-                "type": record_type,
-                "name": cf_record_name,
-                "content": ip,
-                "ttl": 1,
-                "proxied": False
-            }
-            update_resp = requests.put(update_url, headers=headers, json=data)
-            update_result = update_resp.json()
 
-            if update_result.get("success"):
-                print(f"[{record_type}] Cloudflare DNS 更新成功: {ip}")
-            else:
-                print(f"[{record_type}] Cloudflare DNS 更新失败: {update_result}")
+        for record in records:
+            if record["content"] != ip:
+                try:
+                    del_url = f"{url}/{record['id']}"
+                    requests.delete(del_url, headers=headers)
+                    print(f"[清除] 删除旧 {record_type} 记录: {record['content']}")
+                except Exception as e:
+                    print(f"[跳过] 删除多余记录失败: {e}")
+
+        for record in records:
+            if record["content"] == ip:
+                print(f"[{record_type}] 已存在正确记录，无需更新: {ip}")
+                return
+
+        create_data = {
+            "type": record_type,
+            "name": cf_record_name,
+            "content": ip,
+            "ttl": 1,
+            "proxied": False
+        }
+        create_resp = requests.post(url, headers=headers, json=create_data)
+        create_result = create_resp.json()
+        if create_result.get("success"):
+            print(f"[{record_type}] Cloudflare DNS 创建成功: {ip}")
         else:
-            create_data = {
-                "type": record_type,
-                "name": cf_record_name,
-                "content": ip,
-                "ttl": 1,
-                "proxied": False
-            }
-            create_resp = requests.post(url, headers=headers, json=create_data)
-            create_result = create_resp.json()
-            if create_result.get("success"):
-                print(f"[{record_type}] Cloudflare DNS 创建成功: {ip}")
-            else:
-                print(f"[{record_type}] Cloudflare DNS 创建失败: {create_result}")
+            print(f"[{record_type}] Cloudflare DNS 创建失败: {create_result}")
     except Exception as e:
         print(f"[{record_type}] 更新过程异常: {e}")
 
@@ -231,7 +228,7 @@ def tray_icon():
         item('控制台退出', on_exit)
     )
 
-    tray_title = os.path.basename(sys.argv[0])  # 动态设置托盘标题为当前脚本文件名
+    tray_title = os.path.basename(sys.argv[0])
     icon = pystray.Icon("cfnat", image, tray_title, menu)
     icon.run()
 
