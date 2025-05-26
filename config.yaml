@@ -6,6 +6,7 @@ delay: 300
 ipnum:20
 num:10
 task:100
+sync_count: 3
 
 cloudflare:
   email: "onccccccvv@gmail.com"
