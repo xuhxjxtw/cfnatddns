@@ -224,7 +224,7 @@ def tray_icon():
         return
 
     menu = (item('显示/隐藏', on_show_hide), item('退出', on_exit))
-    icon = pystray.Icon("cfnat", image, "cfnat", menu)
+    icon = pystray.Icon("cfnat", image, exe_name, menu)
     icon.run()
 
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
