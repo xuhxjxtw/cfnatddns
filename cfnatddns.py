@@ -230,7 +230,9 @@ def tray_icon():
         item('显示/隐藏', on_show_hide),
         item('控制台退出', on_exit)
     )
-    icon = pystray.Icon("cfnat", image, "cfnat", menu)
+
+    tray_title = os.path.basename(sys.argv[0])  # 动态设置托盘标题为当前脚本文件名
+    icon = pystray.Icon("cfnat", image, tray_title, menu)
     icon.run()
 
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
