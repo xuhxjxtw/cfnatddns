@@ -104,29 +104,31 @@ def update_cf_dns(ip):
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
     try:
-        # 查询当前类型记录
-        params = {"type": record_type, "name": cf_record_name}
-        resp = requests.get(url, headers=headers, params=params)
-        result = resp.json()
+        # 获取所有当前域名的记录（所有类型）
+        params_all = {"name": cf_record_name}
+        resp_all = requests.get(url, headers=headers, params=params_all)
+        result_all = resp_all.json()
 
-        if not result.get("success"):
-            print(f"[{record_type}] 查询 DNS 记录失败: {result}")
+        if not result_all.get("success"):
+            print(f"[查询] 获取记录失败: {result_all}")
             return
 
-        records = result.get("result", [])
+        records = result_all.get("result", [])
         found = False
 
-        # 删除所有同类型旧记录，保留新 IP
+        # 删除所有该域名下非当前类型的记录 + 当前类型的旧 IP
         for record in records:
-            record_id = record["id"]
-            content = record["content"]
-            if content == ip:
-                found = True
-                continue
-            del_url = f"{url}/{record_id}"
+            r_type = record["type"]
+            r_content = record["content"]
+            r_id = record["id"]
+            if r_type == record_type:
+                if r_content == ip:
+                    found = True
+                    continue
+            del_url = f"{url}/{r_id}"
             try:
                 requests.delete(del_url, headers=headers)
-                print(f"[清除] 删除旧 {record_type} 记录: {content}")
+                print(f"[清除] 删除 {r_type} 记录: {r_content}")
             except Exception as e:
                 print(f"[清除] 删除失败: {e}")
 
