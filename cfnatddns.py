@@ -40,17 +40,6 @@ def cleanup_mei_dirs():
 
 cleanup_mei_dirs()
 
-# -------------------- 脚本退出清理 --------------------
-def cleanup_on_exit():
-    if os.path.exists(log_file):
-        try:
-            os.remove(log_file)
-            print("[清理] 已删除日志文件")
-        except Exception as e:
-            print(f"[清理] 删除日志文件失败: {e}")
-
-atexit.register(cleanup_on_exit)
-
 # -------------------- Ctrl+C 信号处理 --------------------
 def signal_handler(sig, frame):
     print("\n[退出] 收到中断信号，正在退出...")
@@ -77,6 +66,7 @@ cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
+sync_count = config.get("sync_count", 2)
 
 # -------------------- IP 工具函数 --------------------
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -89,14 +79,42 @@ def get_ip_type(ip):
     except ValueError:
         return None
 
+def load_ip_log():
+    ip_dict = {"A": [], "AAAA": []}
+    if not os.path.exists(log_file):
+        return ip_dict
+    with open(log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            ip = line.strip()
+            record_type = get_ip_type(ip)
+            if record_type:
+                ip_dict[record_type].append(ip)
+    return ip_dict
+
+def save_ip_log(ip_dict):
+    with open(log_file, "w", encoding="utf-8") as f:
+        for ip in ip_dict["A"] + ip_dict["AAAA"]:
+            f.write(ip + "\n")
+
 def update_cf_dns(ip):
     record_type = get_ip_type(ip)
     if not record_type:
-        print(f"[跳过] 非法 IP 地址: {ip}")
+        print(f"[跳过] 非法 IP: {ip}")
         return
 
-    other_type = "AAAA" if record_type == "A" else "A"
+    ip_dict = load_ip_log()
+    if ip in ip_dict[record_type]:
+        print(f"[跳过] {record_type} IP 已存在: {ip}")
+        return
 
+    ip_dict[record_type].append(ip)
+    if len(ip_dict[record_type]) > sync_count:
+        removed = ip_dict[record_type].pop(0)
+        print(f"[日志] 超出数量，移除最旧 IP: {removed}")
+
+    save_ip_log(ip_dict)
+
+    # Cloudflare 同步
     headers = {
         "X-Auth-Email": cf_email,
         "X-Auth-Key": cf_api_key,
@@ -105,70 +123,31 @@ def update_cf_dns(ip):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除旧类型的记录
     try:
-        del_params = {"type": other_type, "name": cf_record_name}
-        del_resp = requests.get(url, headers=headers, params=del_params)
-        del_result = del_resp.json()
-        if del_result.get("success"):
-            for record in del_result.get("result", []):
-                record_id = record["id"]
-                del_url = f"{url}/{record_id}"
-                d = requests.delete(del_url, headers=headers)
-                print(f"[清除] 已删除旧 {other_type} 记录: {record['content']}")
-        else:
-            print(f"[{other_type}] 查询记录失败（准备删除）: {del_result}")
-    except Exception as e:
-        print(f"[{other_type}] 删除过程异常: {e}")
+        # 删除原有记录
+        resp = requests.get(url, headers=headers, params={"type": record_type, "name": cf_record_name})
+        for record in resp.json().get("result", []):
+            requests.delete(f"{url}/{record['id']}", headers=headers)
 
-    # 更新或添加当前类型记录
-    try:
-        params = {"type": record_type, "name": cf_record_name}
-        resp = requests.get(url, headers=headers, params=params)
-        result = resp.json()
-
-        if not result.get("success"):
-            print(f"[{record_type}] 查询 DNS 记录失败: {result}")
-            return
-
-        records = result.get("result", [])
-        if records:
-            record_id = records[0]["id"]
-            update_url = f"{url}/{record_id}"
+        # 添加当前 IP 列表
+        for ip_item in ip_dict[record_type]:
             data = {
                 "type": record_type,
                 "name": cf_record_name,
-                "content": ip,
+                "content": ip_item,
                 "ttl": 1,
                 "proxied": False
             }
-            update_resp = requests.put(update_url, headers=headers, json=data)
-            update_result = update_resp.json()
-
-            if update_result.get("success"):
-                print(f"[{record_type}] Cloudflare DNS 更新成功: {ip}")
+            resp = requests.post(url, headers=headers, json=data)
+            if resp.json().get("success"):
+                print(f"[{record_type}] 添加成功: {ip_item}")
             else:
-                print(f"[{record_type}] Cloudflare DNS 更新失败: {update_result}")
-        else:
-            create_data = {
-                "type": record_type,
-                "name": cf_record_name,
-                "content": ip,
-                "ttl": 1,
-                "proxied": False
-            }
-            create_resp = requests.post(url, headers=headers, json=create_data)
-            create_result = create_resp.json()
-            if create_result.get("success"):
-                print(f"[{record_type}] Cloudflare DNS 创建成功: {ip}")
-            else:
-                print(f"[{record_type}] Cloudflare DNS 创建失败: {create_result}")
+                print(f"[{record_type}] 添加失败: {resp.json()}")
     except Exception as e:
-        print(f"[{record_type}] 更新过程异常: {e}")
+        print(f"[{record_type}] Cloudflare 更新异常: {e}")
 
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
-
 optional_args = {
     "colo": "-colo=",
     "port": "-port=",
@@ -179,7 +158,6 @@ optional_args = {
     "num": "-num=",
     "task": "-task="
 }
-
 for key, flag in optional_args.items():
     value = config.get(key)
     if value is not None:
@@ -199,7 +177,7 @@ except Exception as e:
     print(f"[错误] 启动失败: {e}")
     exit(1)
 
-# -------------------- 启动系统托盘图标 --------------------
+# -------------------- 托盘图标 --------------------
 console_hwnd = win32console.GetConsoleWindow()
 
 def toggle_console():
@@ -236,7 +214,7 @@ def tray_icon():
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
 tray_thread.start()
 
-# -------------------- 实时日志解析 --------------------
+# -------------------- 实时日志处理 --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
@@ -246,9 +224,4 @@ for line in proc.stdout:
         for ip in ips:
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
-            if ip != current_ip:
-                with open(log_file, "w", encoding="utf-8") as log:
-                    log.write(ip + "\n")
-                current_ip = ip
-                print(f"[更新] 检测到新 IP: {ip}")
-                update_cf_dns(ip)
+            update_cf_dns(ip)
