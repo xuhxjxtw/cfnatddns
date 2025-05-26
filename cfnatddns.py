@@ -150,7 +150,6 @@ def update_cf_dns(ip):
             else:
                 print(f"[{record_type}] Cloudflare DNS 更新失败: {update_result}")
         else:
-            # 没有记录则创建
             create_data = {
                 "type": record_type,
                 "name": cf_record_name,
@@ -169,11 +168,22 @@ def update_cf_dns(ip):
 
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
-for key, value in config.items():
-    # 跳过 cloudflare 区段
-    if key == "cloudflare":
-        continue
-    args.append(f"-{key}={value}")
+
+optional_args = {
+    "colo": "-colo=",
+    "port": "-port=",
+    "addr": "-addr=",
+    "ips": "-ips=",
+    "delay": "-delay=",
+    "ipnum": "-ipnum=",
+    "num": "-num=",
+    "task": "-task="
+}
+
+for key, flag in optional_args.items():
+    value = config.get(key)
+    if value is not None:
+        args.append(f"{flag}{value}")
 
 try:
     proc = subprocess.Popen(
