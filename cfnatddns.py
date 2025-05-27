@@ -71,14 +71,12 @@ except Exception as e:
     print(f"[错误] 配置读取失败: {e}")
     exit(1)
 
-# Cloudflare 配置
 cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
 
-# -------------------- IP 工具函数 --------------------
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 ipv6_pattern = re.compile(r"\b(?:[a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{1,4}\b")
 
@@ -89,6 +87,7 @@ def get_ip_type(ip):
     except ValueError:
         return None
 
+# -------------------- Cloudflare 同步函数 --------------------
 def update_cf_dns(ip):
     record_type = get_ip_type(ip)
     if not record_type:
@@ -147,16 +146,15 @@ def update_cf_dns(ip):
         create_resp = requests.post(url, headers=headers, json=create_data)
         create_result = create_resp.json()
         if create_result.get("success"):
-            print(f"[{record_type}] 创建新记录成功: {ip}")
+            print(f"[同步] 添加 {record_type} IP 成功: {ip}")
         else:
-            print(f"[{record_type}] 创建新记录失败: {create_result}")
+            print(f"[同步] 添加 {record_type} IP 失败: {create_result}")
 
     except Exception as e:
         print(f"[{record_type}] 更新过程异常: {e}")
 
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
-
 optional_args = {
     "colo": "-colo=",
     "port": "-port=",
@@ -167,7 +165,6 @@ optional_args = {
     "num": "-num=",
     "task": "-task="
 }
-
 for key, flag in optional_args.items():
     value = config.get(key)
     if value is not None:
@@ -218,7 +215,6 @@ def tray_icon():
         item('显示/隐藏', on_show_hide),
         item('控制台退出', on_exit)
     )
-
     tray_title = os.path.basename(sys.argv[0])
     icon = pystray.Icon("cfnat", image, tray_title, menu)
     icon.run()
