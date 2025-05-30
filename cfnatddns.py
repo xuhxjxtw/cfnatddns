@@ -10,7 +10,6 @@ import sys
 import atexit
 import signal
 import threading
-from datetime import datetime
 from PIL import Image
 import pystray
 from pystray import MenuItem as item
@@ -87,21 +86,18 @@ def load_ip_log():
         return
     with open(log_file, "r", encoding="utf-8") as f:
         for line in f:
-            ip_match = ipv4_pattern.search(line) or ipv6_pattern.search(line)
-            if ip_match:
-                ip = ip_match.group(0)
-                rtype = get_ip_type(ip)
-                if rtype and ip not in ip_cache[rtype]:
-                    ip_cache[rtype].append(ip)
+            ip = line.strip()
+            rtype = get_ip_type(ip)
+            if rtype and ip not in ip_cache[rtype]:
+                ip_cache[rtype].append(ip)
     ip_cache["A"] = ip_cache["A"][:sync_count]
     ip_cache["AAAA"] = ip_cache["AAAA"][:sync_count]
 
 def save_ip_log():
     with open(log_file, "w", encoding="utf-8") as f:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for rtype in ["A", "AAAA"]:
             for ip in ip_cache[rtype]:
-                f.write(f"{now} {ip}\n")
+                f.write(ip + "\n")
 
 load_ip_log()
 
@@ -182,11 +178,7 @@ optional_args = {
     "delay": "-delay=",
     "ipnum": "-ipnum=",
     "num": "-num=",
-    "task": "-task=",
-    "tls": "-tls=",
-    "random": "-random=",
-    "domain": "-domain="
-    
+    "task": "-task="
 }
 for key, flag in optional_args.items():
     value = config.get(key)
