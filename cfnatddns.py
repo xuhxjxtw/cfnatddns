@@ -16,6 +16,7 @@ from pystray import MenuItem as item
 import win32gui
 import win32con
 import win32console
+from datetime import datetime  # 新增时间模块
 
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
@@ -103,7 +104,6 @@ def update_cf_dns(ip):
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
     try:
-        # 获取所有当前域名的记录（所有类型）
         params_all = {"name": cf_record_name}
         resp_all = requests.get(url, headers=headers, params=params_all)
         result_all = resp_all.json()
@@ -115,7 +115,6 @@ def update_cf_dns(ip):
         records = result_all.get("result", [])
         found = False
 
-        # 删除所有该域名下非当前类型的记录 + 当前类型的旧 IP
         for record in records:
             r_type = record["type"]
             r_content = record["content"]
@@ -135,7 +134,6 @@ def update_cf_dns(ip):
             print(f"[{record_type}] 当前 IP 已存在，无需更新: {ip}")
             return
 
-        # 添加新记录
         create_data = {
             "type": record_type,
             "name": cf_record_name,
@@ -222,7 +220,7 @@ def tray_icon():
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
 tray_thread.start()
 
-# -------------------- 实时日志监控 --------------------
+# -------------------- 实时日志监控（含时间） --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
@@ -233,8 +231,10 @@ for line in proc.stdout:
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
             if ip != current_ip:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log_line = f"{timestamp} {ip}"
                 with open(log_file, "w", encoding="utf-8") as log:
-                    log.write(ip + "\n")
+                    log.write(log_line + "\n")
                 current_ip = ip
                 print(f"[更新] 检测到新 IP: {ip}")
                 update_cf_dns(ip)
