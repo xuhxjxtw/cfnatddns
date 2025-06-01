@@ -10,6 +10,7 @@ import sys
 import atexit
 import signal
 import threading
+from datetime import datetime
 from PIL import Image
 import pystray
 from pystray import MenuItem as item
@@ -20,13 +21,11 @@ import win32console
 exe_name = "cfnat-windows-amd64.exe"
 log_file = "cfnat_log.txt"
 config_file = "config.yaml"
-current_ip = None
 
 # -------------------- 清理旧的 _MEIxxxx 临时目录 --------------------
 def cleanup_mei_dirs():
     temp_dir = tempfile.gettempdir()
     current_dir = getattr(sys, '_MEIPASS', None)
-
     for item in os.listdir(temp_dir):
         path = os.path.join(temp_dir, item)
         if item.startswith("_MEI") and os.path.isdir(path):
@@ -80,24 +79,36 @@ def get_ip_type(ip):
 
 # -------------------- IP 缓存初始化与保存 --------------------
 ip_cache = {"A": [], "AAAA": []}
+log_data = []
 
 def load_ip_log():
     if not os.path.exists(log_file):
         return
     with open(log_file, "r", encoding="utf-8") as f:
         for line in f:
-            ip = line.strip()
-            rtype = get_ip_type(ip)
-            if rtype and ip not in ip_cache[rtype]:
-                ip_cache[rtype].append(ip)
+            line = line.strip()
+            if not line: continue
+            try:
+                time_part, ip = line[:19], line[20:]
+                rtype = get_ip_type(ip)
+                if rtype and ip not in ip_cache[rtype]:
+                    log_data.append((time_part, ip))
+                    ip_cache[rtype].append(ip)
+            except Exception:
+                continue
     ip_cache["A"] = ip_cache["A"][:sync_count]
     ip_cache["AAAA"] = ip_cache["AAAA"][:sync_count]
 
 def save_ip_log():
+    all_lines = []
+    for rtype in ["A", "AAAA"]:
+        for ip in ip_cache[rtype]:
+            for time_str, cached_ip in reversed(log_data):
+                if cached_ip == ip:
+                    all_lines.append(f"{time_str} {ip}")
+                    break
     with open(log_file, "w", encoding="utf-8") as f:
-        for rtype in ["A", "AAAA"]:
-            for ip in ip_cache[rtype]:
-                f.write(ip + "\n")
+        f.write("\n".join(all_lines) + "\n")
 
 load_ip_log()
 
@@ -125,22 +136,18 @@ def update_cf_dns(ip):
     try:
         del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
-        del_result = del_resp.json()
-        if del_result.get("success"):
-            for record in del_result.get("result", []):
+        if del_resp.json().get("success"):
+            for record in del_resp.json().get("result", []):
                 record_id = record["id"]
-                del_url = f"{url}/{record_id}"
-                requests.delete(del_url, headers=headers)
-                print(f"[清除] 已删除旧 {other_type} 记录: {record['content']}")
+                requests.delete(f"{url}/{record_id}", headers=headers)
+                print(f"[清除] 删除旧 {other_type} 记录: {record['content']}")
     except Exception as e:
         print(f"[{other_type}] 删除异常: {e}")
 
     try:
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
-        result = resp.json()
-        existing = result.get("result", []) if result.get("success") else []
-
+        existing = resp.json().get("result", []) if resp.json().get("success") else []
         existing_ips = {r["content"]: r["id"] for r in existing}
         desired_ips = ip_cache[record_type]
 
@@ -159,12 +166,11 @@ def update_cf_dns(ip):
                 "ttl": 1,
                 "proxied": False
             }
-            create_resp = requests.post(url, headers=headers, json=data)
-            create_result = create_resp.json()
-            if create_result.get("success"):
+            resp = requests.post(url, headers=headers, json=data)
+            if resp.json().get("success"):
                 print(f"[同步] 添加 {record_type} IP 成功: {ip_val}")
             else:
-                print(f"[同步] 添加 {record_type} IP 失败: {create_result}")
+                print(f"[同步] 添加 {record_type} IP 失败: {resp.json()}")
     except Exception as e:
         print(f"[{record_type}] 同步异常: {e}")
 
@@ -211,8 +217,7 @@ def toggle_console():
 def on_show_hide(icon, item): toggle_console()
 def on_exit(icon, item):
     icon.stop()
-    try:
-        proc.terminate()
+    try: proc.terminate()
     except Exception: pass
     os._exit(0)
 
@@ -222,20 +227,16 @@ def tray_icon():
     except Exception as e:
         print(f"[错误] 无法加载托盘图标: {e}")
         return
-
     tray_title = os.path.basename(sys.argv[0])
     menu = (item('显示/隐藏', on_show_hide), item('控制台退出', on_exit))
-    icon = pystray.Icon("cfnat", image, tray_title, menu)
-    icon.run()
+    pystray.Icon("cfnat", image, tray_title, menu).run()
 
-tray_thread = threading.Thread(target=tray_icon, daemon=True)
-tray_thread.start()
+threading.Thread(target=tray_icon, daemon=True).start()
 
 # -------------------- 实时监听输出并更新 IP --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
-
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
@@ -245,6 +246,9 @@ for line in proc.stdout:
             if rtype and ip not in ip_cache[rtype]:
                 ip_cache[rtype].insert(0, ip)
                 ip_cache[rtype] = ip_cache[rtype][:sync_count]
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log_data.insert(0, (timestamp, ip))
+                log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]
                 save_ip_log()
                 print(f"[更新] 检测到新 {rtype} IP: {ip}")
                 update_cf_dns(ip)
