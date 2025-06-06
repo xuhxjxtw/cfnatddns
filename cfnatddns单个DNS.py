@@ -138,7 +138,7 @@ def update_cf_dns(ip):
             "type": record_type,
             "name": cf_record_name,
             "content": ip,
-            "ttl": 60,
+            "ttl": 1,
             "proxied": False
         }
         create_resp = requests.post(url, headers=headers, json=create_data)
