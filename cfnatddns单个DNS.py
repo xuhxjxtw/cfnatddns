@@ -220,7 +220,7 @@ def tray_icon():
 tray_thread = threading.Thread(target=tray_icon, daemon=True)
 tray_thread.start()
 
-# -------------------- 实时日志监控（含时间、IP和延迟） --------------------
+# -------------------- 实时日志监控（含时间） --------------------
 for line in proc.stdout:
     line = line.strip()
     print(line)
@@ -231,22 +231,10 @@ for line in proc.stdout:
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
             if ip != current_ip:
-                # 提取延迟信息 (假设延迟信息格式为 "xxx ms")
-                delay_match = re.search(r"(\d+)\s?ms", line)
-                delay = delay_match.group(1) if delay_match else "N/A"
-                
-                # 获取当前时间戳
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                # 更新日志行内容，加入延迟
-                log_line = f"{timestamp} {ip} 延迟: {delay}ms"
-                
-                # 将新日志写入文件
+                log_line = f"{timestamp} {ip}"
                 with open(log_file, "w", encoding="utf-8") as log:
                     log.write(log_line + "\n")
-                
                 current_ip = ip
-                print(f"[更新] 检测到新 IP: {ip} 延迟: {delay}ms")
-                
-                # 更新 Cloudflare DNS
+                print(f"[更新] 检测到新 IP: {ip}")
                 update_cf_dns(ip)
