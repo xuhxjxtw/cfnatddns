@@ -28,13 +28,15 @@ DNS绑定域名
 
 
 
-完全模拟本地:
+完全模拟本地单个DNS
+
 打包好的下载地址:
-https://wwss.lanzouq.com/i4LTD2y6p9vi
+https://wwss.lanzouq.com/i31An30p3red
 
 
 增加一个支持自定义多个dns直接同步：
-https://wwss.lanzouq.com/i2bHb2y6p9pc
+
+https://wwss.lanzouq.com/imPKX30p3r3c
 
 
 [![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
