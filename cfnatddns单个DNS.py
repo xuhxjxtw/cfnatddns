@@ -221,6 +221,12 @@ tray_thread = threading.Thread(target=tray_icon, daemon=True)
 tray_thread.start()
 
 # -------------------- 实时日志监控（含时间） --------------------
+dns_lock = threading.Lock()
+
+def async_update_cf_dns(ip):
+    with dns_lock:
+        update_cf_dns(ip)
+
 for line in proc.stdout:
     line = line.strip()
     print(line)
@@ -237,4 +243,4 @@ for line in proc.stdout:
                     log.write(log_line + "\n")
                 current_ip = ip
                 print(f"[更新] 检测到新 IP: {ip}")
-                update_cf_dns(ip)
+                threading.Thread(target=async_update_cf_dns, args=(ip,), daemon=True).start()
