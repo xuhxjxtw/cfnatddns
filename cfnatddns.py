@@ -59,12 +59,12 @@ except Exception as e:
     print(f"[错误] 配置读取失败: {e}")
     exit(1)
 
-cf_conf        = config.get("cloudflare", {})
-cf_email       = cf_conf.get("email")
-cf_api_key     = cf_conf.get("api_key")
-cf_zone_id     = cf_conf.get("zone_id")
+cf_conf = config.get("cloudflare", {})
+cf_email = cf_conf.get("email")
+cf_api_key = cf_conf.get("api_key")
+cf_zone_id = cf_conf.get("zone_id")
 cf_record_name = cf_conf.get("record_name")
-sync_count     = config.get("sync_count", 1)
+sync_count = config.get("sync_count", 1)
 
 # -------------------- IP 工具 --------------------
 ipv4_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -96,7 +96,7 @@ def load_ip_log():
                     ip_cache[rtype].append(ip)
             except Exception:
                 continue
-    ip_cache["A"]    = ip_cache["A"][:sync_count]
+    ip_cache["A"] = ip_cache["A"][:sync_count]
     ip_cache["AAAA"] = ip_cache["AAAA"][:sync_count]
 
 def save_ip_log():
@@ -130,9 +130,9 @@ def update_cf_dns(ip):
         "X-Auth-Key": cf_api_key,
         "Content-Type": "application/json"
     }
+
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
-    # 删除旧类型记录
     try:
         del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
@@ -144,29 +144,26 @@ def update_cf_dns(ip):
     except Exception as e:
         print(f"[{other_type}] 删除异常: {e}")
 
-    # 同步当前类型
     try:
         params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
         existing = resp.json().get("result", []) if resp.json().get("success") else []
         existing_ips = {r["content"]: r["id"] for r in existing}
-        desired_ips  = ip_cache[record_type]
+        desired_ips = ip_cache[record_type]
 
-        # 删除多余
         for ip_val, r_id in existing_ips.items():
             if ip_val not in desired_ips:
                 requests.delete(f"{url}/{r_id}", headers=headers)
                 print(f"[同步] 删除多余 {record_type} IP: {ip_val}")
 
-        # 添加缺失
         for ip_val in desired_ips:
             if ip_val in existing_ips:
                 continue
             data = {
-                "type":    record_type,
-                "name":    cf_record_name,
+                "type": record_type,
+                "name": cf_record_name,
                 "content": ip_val,
-                "ttl":     1,
+                "ttl": 1,
                 "proxied": False
             }
             resp = requests.post(url, headers=headers, json=data)
@@ -177,25 +174,16 @@ def update_cf_dns(ip):
     except Exception as e:
         print(f"[{record_type}] 同步异常: {e}")
 
-# -------------------- 异步包装 --------------------
-dns_lock = threading.Lock()
-
-def async_update_cf_dns(ip):
-    with dns_lock:
-        print(f"[同步] 正在同步 IP: {ip}")
-        update_cf_dns(ip)
-        print(f"[完成] IP 同步完成: {ip}")
-
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
 optional_args = {
     "colo": "-colo=",
     "port": "-port=",
     "addr": "-addr=",
-    "ips":  "-ips=",
-    "delay":"-delay=",
-    "ipnum":"-ipnum=",
-    "num":  "-num=",
+    "ips": "-ips=",
+    "delay": "-delay=",
+    "ipnum": "-ipnum=",
+    "num": "-num=",
     "task": "-task="
 }
 for key, flag in optional_args.items():
@@ -240,10 +228,7 @@ def tray_icon():
         print(f"[错误] 无法加载托盘图标: {e}")
         return
     tray_title = os.path.basename(sys.argv[0])
-    menu = (
-        item('显示/隐藏', on_show_hide),
-        item('控制台退出', on_exit)
-    )
+    menu = (item('显示/隐藏', on_show_hide), item('控制台退出', on_exit))
     pystray.Icon("cfnat", image, tray_title, menu).run()
 
 threading.Thread(target=tray_icon, daemon=True).start()
@@ -255,7 +240,6 @@ for line in proc.stdout:
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
-            # 过滤伪 IPv6
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
             rtype = get_ip_type(ip)
@@ -264,9 +248,7 @@ for line in proc.stdout:
                 ip_cache[rtype] = ip_cache[rtype][:sync_count]
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log_data.insert(0, (timestamp, ip))
-                # 保持 log_data 只含当前缓存 IP
-                log_data[:] = [e for e in log_data if e[1] in ip_cache["A"] + ip_cache["AAAA"]]
+                log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]
                 save_ip_log()
                 print(f"[更新] 检测到新 {rtype} IP: {ip}")
-                # 异步同步，不阻塞主循环
-                threading.Thread(target=async_update_cf_dns, args=(ip,), daemon=True).start()
+                threading.Thread(target=update_cf_dns, args=(ip,), daemon=True).start()
