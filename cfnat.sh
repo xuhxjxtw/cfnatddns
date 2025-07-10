@@ -182,9 +182,9 @@ break_end() {
 install_cfnat(){
     if [ ! ${Architecture} = "termux" ]; then
         if [ -n "$1" ]; then 
-            install curl nohup crontab ps
+            install curl nohup crontab ps jq
         else
-            check_and_install curl nohup crontab ps
+            check_and_install curl nohup crontab ps jq
         fi
     fi
 
@@ -682,14 +682,14 @@ update_cloudflare_dns() {
             -H "X-Auth-Email: ${email}" \
             -H "X-Auth-Key: ${api_key}" \
             -H "Content-Type: application/json" \
-            --data '{"type":"'"${record_type}"'","name":"'"${cloudflare_record_name}"'","content":"'"${new_ip}"'","ttl":1,"proxied":true}')
+            --data '{"type":"'"${record_type}"'","name":"'"${cloudflare_record_name}"'","content":"'"${new_ip}"'","ttl":1,"proxied":false}')
     else
         echo -e "${yellow}正在更新现有的 ${record_type} 记录 (ID: ${record_id})...${re}"
         response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
             -H "X-Auth-Email: ${email}" \
             -H "X-Auth-Key: ${api_key}" \
             -H "Content-Type: application/json" \
-            --data '{"type":"'"${record_type}"'","name":"'"${cloudflare_record_name}"'","content":"'"${new_ip}"'","ttl":1,"proxied":true}')
+            --data '{"type":"'"${record_type}"'","name":"'"${cloudflare_record_name}"'","content":"'"${new_ip}"'","ttl":1,"proxied":false}')
     fi
 
     if echo "$response" | jq -e '.success' >/dev/null; then
