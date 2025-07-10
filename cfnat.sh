@@ -84,7 +84,7 @@ install(){
     if [ $# -eq 0 ]; then
         echo -e "${red}未提供软件包参数!${re}"
         return 1
-    fi # 这一行从 'f' 更改为 'fi'
+    fi
 
     for package in "$@"; do
         if command -v "$package" &>/dev/null; then
@@ -323,7 +323,7 @@ up_ips() {
     # 检测文件是否存在
     if [ -f "${cfnat_file}/ips-v${cfnat_ips}.txt" ]; then
         read -p "IPv${cfnat_ips}库文件已存在，是否重新下载(N): " up_ipss
-        up_ipss=${up_ipss^^}  # 将输入�������������换为大写
+        up_ipss=${up_ipss^^}  # 将输入转换为大写
         if [ "$up_ipss" = "Y" ]; then
             download_and_copy
         fi
@@ -572,10 +572,10 @@ config_cfnat(){
 
         echo ""
         read -p "是否随机生成IP（默认 Y）: " random_config
-        if [ "${cfnat_config_plus^^}" = "N" ] || [ "${cfnat_config_plus^^}" = "NO" ]; then
-            random=${random:-"false"}
+        if [ "${random_config^^}" = "N" ] || [ "${random_config^^}" = "NO" ]; then
+            random="false"
         else
-            random=${random:-"true"}
+            random="true"
         fi
         config_cfnat_write "random" "$random"
 
@@ -907,21 +907,46 @@ uninstall139() {
 }
 
 # 监控 cfnat 日志并同步 DNS
-last_synced_ip=""  # 新增：记录上次同步的 IP
+monitor_and_sync_ddns() {
+    local cfnat_output_log="$cfnat_file/cfnat_output.log"
+    local last_synced_ip=""  # 记录上次同步的 IP
 
-tail -F "$cfnat_output_log" 2>/dev/null | \
-while IFS= read -r line; do
-    echo "$line"
-    current_best_ip=$(echo "$line" | grep -oP '(?<=选择最佳连接: 地址: )(\[[0-9A-Fa-f:]+\]|[0-9.]+)(?=:)')
-    current_best_ip=${current_best_ip//[\[\]]/}
-
-    # 新增逻辑：只在 IP 变动时才同步
-    if [ -n "$current_best_ip" ] && [ "$current_best_ip" != "$last_synced_ip" ]; then
-        echo -e "${green}检测到新的最佳IP: $current_best_ip${re}"
-        update_cloudflare_dns "$current_best_ip"
-        last_synced_ip="$current_best_ip"
+    # 检查 cfnat 是否正在运行，如果未运行则尝试启动
+    if pgrep -f "cfnat-" > /dev/null; then
+        echo -e "${green}cfnat 已经在运行。${re}"
+    else
+        echo -e "${yellow}cfnat 未运行，正在尝试启动 cfnat...${re}"
+        go_cfnat # 调用启动 cfnat 的函数
+        # 等待一小段时间，确保 cfnat 启动并开始写入日志
+        sleep 5 
+        if ! pgrep -f "cfnat-" > /dev/null; then
+            echo -e "${red}无法启动 cfnat。请检查 cfnat 配置或手动启动。${re}"
+            break_end
+            return 1
+        fi
+        echo -e "${green}cfnat 已成功启动。${re}"
     fi
-done
+
+    if [ ! -f "$cfnat_output_log" ]; then
+        echo -e "${red}cfnat 日志文件 ($cfnat_output_log) 不存在，DDNS 监控无法启动。${re}"
+        break_end
+        return 1
+    fi
+
+    echo -e "${yellow}开始监控 cfnat 日志并同步 Cloudflare DNS... (按 Ctrl+C 停止)${re}"
+    tail -F "$cfnat_output_log" 2>/dev/null | \
+    while IFS= read -r line; do
+        echo "$line"
+        current_best_ip=$(echo "$line" | grep -oP '(?<=选择最佳连接: 地址: )(\[[0-9A-Fa-f:]+\]|[0-9.]+)(?=:)')
+        current_best_ip=${current_best_ip//[\[\]]/}
+
+        # 只在 IP 变动时才同步
+        if [ -n "$current_best_ip" ] && [ "$current_best_ip" != "$last_synced_ip" ]; then
+            echo -e "${green}检测到新的最佳IP: $current_best_ip${re}"
+            update_cloudflare_dns "$current_best_ip"
+            last_synced_ip="$current_best_ip"
+        fi
+    done
 }
 
 # 停止 DDNS 监控 (仅在有后台进程时才需要，但当前实现是前台运行，此函数主要用于清除历史状态或辅助菜单逻辑)
@@ -1063,7 +1088,7 @@ else
         6)
             if [ "$OneclickInstallation" = "${green}一键安装" ]; then
                 install_cfnat
-            elif [ ! "$statecfnat" = "${red}未运���" ]; then
+            elif [ ! "$statecfnat" = "${red}未运行" ]; then
                 kill_cfnat
                 delete_cron
             fi
