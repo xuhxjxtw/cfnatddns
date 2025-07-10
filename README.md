@@ -40,3 +40,11 @@ https://wwss.lanzouq.com/imPKX30p3r3c
 
 
 [![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+
+
+
+ Cfnatddns 手機版，路由器，服務器。
+
+```
+curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/cfnat.sh -o ~/cfnat.sh && chmod +x ~/cfnat.sh && bash ~/cfnat.sh
+```
