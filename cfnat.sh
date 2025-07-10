@@ -365,25 +365,25 @@ check_cfnat(){
         release="Android"
     else
         if [[ -f /etc/redhat-release ]]; then 
-            release="Centos" 
+            release="Centos"
         elif grep -q -E -i "openwrt" /etc/os-release 2>/dev/null; then 
-            release="OpenWRT" 
+            release="OpenWRT"
         elif grep -q -E -i "alpine" /etc/issue 2>/dev/null; then 
-            release="Alpine" 
+            release="Alpine"
         elif grep -q -E -i "debian" /etc/issue 2>/dev/null; then 
-            release="Debian" 
+            release="Debian"
         elif grep -q -E -i "ubuntu" /etc/issue 2>/dev/null; then 
-            release="Ubuntu" 
+            release="Ubuntu"
         elif grep -q -E -i "centos|red hat|redhat" /etc/issue 2>/dev/null; then 
-            release="Centos" 
+            release="Centos"
         elif grep -q -E -i "openwrt" /proc/version 2>/dev/null; then 
-            release="OpenWRT" 
+            release="OpenWRT"
         elif grep -q -E -i "debian" /proc/version 2>/dev/null; then 
-            release="Debian" 
+            release="Debian"
         elif grep -q -E -i "ubuntu" /proc/version 2>/dev/null; then 
-            release="Ubuntu" 
+            release="Ubuntu"
         elif grep -q -E -i "centos|red hat|redhat" /proc/version 2>/dev/null; then 
-            release="Centos" 
+            release="Centos"
         else  
             site_release
         fi
@@ -614,6 +614,39 @@ config_cloudflare_ddns() {
             return 1
         fi
         echo -e "${green}jq 安装成功。${re}"
+    fi
+
+    # 加载现有配置
+    local current_email=""
+    local current_api_key=""
+    local current_zone_id=""
+    local current_record_name=""
+
+    if [ -f "$ddns_config_file" ]; then
+        current_email=$(grep '^cloudflare_email=' "$ddns_config_file" | cut -d'=' -f2)
+        current_api_key=$(grep '^cloudflare_api_key=' "$ddns_config_file" | cut -d'=' -f2)
+        current_zone_id=$(grep '^cloudflare_zone_id=' "$ddns_config_file" | cut -d'=' -f2)
+        current_record_name=$(grep '^cloudflare_record_name=' "$ddns_config_file" | cut -d'=' -f2)
+    fi
+
+    if [ -n "$current_email" ] || [ -n "$current_api_key" ] || [ -n "$current_zone_id" ] || [ -n "$current_record_name" ]; then
+        echo -e "${yellow}检测到已保存的 Cloudflare DDNS 配置:${re}"
+        echo -e "${yellow}  邮箱: ${green}$current_email${re}"
+        echo -e "${yellow}  API Key: ${green}$current_api_key${re}" # 敏感信息，但为了展示可以显示部分
+        echo -e "${yellow}  Zone ID: ${green}$current_zone_id${re}"
+        echo -e "${yellow}  记录名称: ${green}$current_record_name${re}"
+        echo "------------------------------------"
+        read -p "是否要更新这些配置？(Y/N，默认 N): " update_choice
+        update_choice=${update_choice^^} # 转换为大写
+        if [ "$update_choice" != "Y" ]; then
+            echo -e "${yellow}已取消配置更新，返回主菜单。${re}"
+            break_end
+            return 0
+        fi
+        clear
+        echo -e "${yellow}------------------------------------${re}"
+        echo -e "${yellow}        Cloudflare DDNS 配置        ${re}"
+        echo -e "${yellow}------------------------------------${re}"
     fi
 
     echo -e "${yellow}请提供您的 Cloudflare API 信息。${re}"
@@ -943,7 +976,8 @@ monitor_and_sync_ddns() {
         # 只在 IP 变动时才同步
         if [ -n "$current_best_ip" ] && [ "$current_best_ip" != "$last_synced_ip" ]; then
             echo -e "${green}检测到新的最佳IP: $current_best_ip${re}"
-            update_cloudflare_dns "$current_best_ip"
+            # 在后台执行 update_cloudflare_dns，不阻塞当前循环
+            update_cloudflare_dns "$current_best_ip" &
             last_synced_ip="$current_best_ip"
         fi
     done
@@ -1039,7 +1073,7 @@ else
         echo -e "${yellow} 12. 停止 Cloudflare DDNS 监控${re}" # 此选项现在主要是提示用户如何退出
     fi
     #echo "--------------------------------"
-    echo -e "\033[0;97m 0. 退出脚本" 
+    echo -e "\033[0;97m 0. 退出脚本"
     echo -e "${yellow}--------------------------------${re}"
     ps=""
     siteps=""
