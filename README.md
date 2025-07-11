@@ -1,6 +1,5 @@
 
-[![Use EdgeOne Pages to deploy](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg)](https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2FTencentEdgeOne%2Fpages-templates%2Ftree%2Fmain%2Fexamples%2Fvue-template&output-directory=.%2Fdist&install-command=npm%20install&build-command=npm%20run%20build)
-
+[![使用 EdgeOne Pages 部署](https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg) ](https://edgeone.ai/pages/new?=https://github.com/onlyno999/cfnatddns.git )
 
 
 # cfnatddns cfnat
