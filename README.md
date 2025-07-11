@@ -44,7 +44,6 @@ https://wwss.lanzouq.com/i31An30p3red
 https://wwss.lanzouq.com/imPKX30p3r3c
 
 
-[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
 
 
 
