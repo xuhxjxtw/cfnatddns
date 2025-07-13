@@ -24,7 +24,7 @@ DNS绑定域名
 区域id，点击域名，点击概述，拉到最下面就会看到一个区域id复制下。
 
 
-![image](https://img.picui.cn/free/2025/05/25/68320ef5d63d4.jpg)
+![image](https://raw.githubusercontent.com/onlyno999/cfnatddns/refs/heads/main/Screenshot_2025-07-14-00-33-33-687_anddea.youtube.jpg)
 
 最后点击域名，点击dns。新增一个 A记录。二级域名。 Ip随便填吧，然后再把这个二级域名填入到填入到配置文件。
 最后一次更新，以后没得更新了。
