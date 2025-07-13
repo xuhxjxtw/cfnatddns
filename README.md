@@ -20,7 +20,7 @@ DNS绑定域名
 
 登录进去以后点右上角。小人头。你就会看到api，查看就对了。
 
-![image](https://img.picui.cn/free/2025/05/25/68320ef5a23d3.jpg)
+![image](https://raw.githubusercontent.com/onlyno999/cfnatddns/refs/heads/main/Screenshot_2025-07-14-00-33-42-874_anddea.youtube.jpg)
 区域id，点击域名，点击概述，拉到最下面就会看到一个区域id复制下。
 
 
