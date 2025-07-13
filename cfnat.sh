@@ -629,47 +629,78 @@ config_cloudflare_ddns() {
         current_record_name=$(grep '^cloudflare_record_name=' "$ddns_config_file" | cut -d'=' -f2)
     fi
 
-    if [ -n "$current_email" ] || [ -n "$current_api_key" ] || [ -n "$current_zone_id" ] || [ -n "$current_record_name" ]; then
-        echo -e "${yellow}检测到已保存的 Cloudflare DDNS 配置:${re}"
-        echo -e "${yellow}  邮箱: ${green}$current_email${re}"
-        echo -e "${yellow}  API Key: ${green}$current_api_key${re}" # 敏感信息，但为了展示可以显示部分
-        echo -e "${yellow}  Zone ID: ${green}$current_zone_id${re}"
-        echo -e "${yellow}  记录名称: ${green}$current_record_name${re}"
-        echo "------------------------------------"
-        read -p "是否要更新这些配置？(Y/N，默认 N): " update_choice
-        update_choice=${update_choice^^} # 转换为大写
-        if [ "$update_choice" != "Y" ]; then
-            echo -e "${yellow}已取消配置更新，返回主菜单。${re}"
-            break_end
-            return 0
-        fi
+    echo -e "${yellow}当前 Cloudflare DDNS 配置:${re}"
+    echo -e "${yellow}  邮箱: ${green}${current_email:-未设置}${re}"
+    echo -e "${yellow}  API Key: ${green}${current_api_key:-未设置}${re}"
+    echo -e "${yellow}  Zone ID: ${green}${current_zone_id:-未设置}${re}"
+    echo -e "${yellow}  记录名称: ${green}${current_record_name:-未设置}${re}"
+    echo "------------------------------------"
+
+    read -p "是否要更新这些配置？(Y/N，默认 N): " update_choice
+    update_choice=${update_choice^^} # 转换为大写
+
+    local new_email="$current_email"
+    local new_api_key="$current_api_key"
+    local new_zone_id="$current_zone_id"
+    local new_record_name="$current_record_name"
+
+    if [ "$update_choice" = "Y" ]; then
         clear
         echo -e "${yellow}------------------------------------${re}"
         echo -e "${yellow}        Cloudflare DDNS 配置        ${re}"
         echo -e "${yellow}------------------------------------${re}"
+        echo -e "${yellow}请提供您的 Cloudflare API 信息。${re}"
+        echo -e "${yellow}您可以在 Cloudflare 仪表板中找到这些信息。${re}"
+        echo "获取 API Key: [Cloudflare API Keys](https://dash.cloudflare.com/profile/api-tokens)"
+        echo "获取 Zone ID: 在您的域名概述页面右侧边栏"
+        echo "------------------------------------"
+
+        # 邮箱
+        read -p "当前邮箱: ${green}${current_email:-未设置}${re}，是否修改？(Y/N，默认 N): " modify_email
+        modify_email=${modify_email^^}
+        if [ "$modify_email" = "Y" ]; then
+            read -p "输入 Cloudflare 注册邮箱: " temp_email
+            new_email="${temp_email}"
+        fi
+
+        # Global API Key
+        read -p "当前 Global API Key: ${green}${current_api_key:-未设置}${re}，是否修改？(Y/N，默认 N): " modify_api_key
+        modify_api_key=${modify_api_key^^}
+        if [ "$modify_api_key" = "Y" ]; then
+            read -p "输入 Cloudflare Global API Key: " temp_api_key
+            new_api_key="${temp_api_key}"
+        fi
+
+        # Zone ID
+        read -p "当前 Zone ID: ${green}${current_zone_id:-未设置}${re}，是否修改？(Y/N，默认 N): " modify_zone_id
+        modify_zone_id=${modify_zone_id^^}
+        if [ "$modify_zone_id" = "Y" ]; then
+            read -p "输入您的 Zone ID: " temp_zone_id
+            new_zone_id="${temp_zone_id}"
+        fi
+
+        # DNS 记录名称
+        read -p "当前 DNS 记录名称: ${green}${current_record_name:-未设置}${re}，是否修改？(Y/N，默认 N): " modify_record_name
+        modify_record_name=${modify_record_name^^}
+        if [ "$modify_record_name" = "Y" ]; then
+            read -p "输入要更新的 DNS 记录名称 (例如: example.com 或 sub.example.com): " temp_record_name
+            new_record_name="${temp_record_name}"
+        fi
+
+        # 保存配置到文件
+        mkdir -p "$cfnat_file" # 确保目录存在
+        touch "$ddns_config_file" # 确保文件存在
+
+        config_cfnat_write_ddns "cloudflare_email" "$new_email"
+        config_cfnat_write_ddns "cloudflare_api_key" "$new_api_key"
+        config_cfnat_write_ddns "cloudflare_zone_id" "$new_zone_id"
+        config_cfnat_write_ddns "cloudflare_record_name" "$new_record_name"
+
+        echo -e "${green}Cloudflare DDNS 配置已保存到 $ddns_config_file ${re}"
+        echo -e "${green}请确保您输入的 API 信息是正确的。${re}"
+    else
+        echo -e "${yellow}已取消配置更新，返回主菜单。${re}"
     fi
-
-    echo -e "${yellow}请提供您的 Cloudflare API 信息。${re}"
-    echo -e "${yellow}您可以在 Cloudflare 仪表板中找到这些信息。${re}"
-    echo "获取 API Key: [Cloudflare API Keys](https://dash.cloudflare.com/profile/api-tokens)"
-    echo "获取 Zone ID: 在您的域名概述页面右侧边栏"
-
-    read -p "输入 Cloudflare 注册邮箱: " email
-    read -p "输入 Cloudflare Global API Key: " api_key
-    read -p "输入您的 Zone ID: " zone_id
-    read -p "输入要更新的 DNS 记录名称 (例如: example.com 或 sub.example.com): " record_name
-
-    # 保存配置到文件
-    mkdir -p "$cfnat_file" # 确保目录存在
-    touch "$ddns_config_file" # 确保文件存在
-
-    config_cfnat_write_ddns "cloudflare_email" "$email"
-    config_cfnat_write_ddns "cloudflare_api_key" "$api_key"
-    config_cfnat_write_ddns "cloudflare_zone_id" "$zone_id"
-    config_cfnat_write_ddns "cloudflare_record_name" "$record_name"
-
-    echo -e "${green}Cloudflare DDNS 配置已保存到 $ddns_config_file ${re}"
-    echo -e "${green}请确保您输入的 API 信息是正确的。${re}"
     break_end
     return 0
 }
