@@ -57,3 +57,26 @@ curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/cfnat.sh -o ~
 ```
 curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/2cfnat.sh -o ~/2cfnat.sh && chmod +x ~/2cfnat.sh && bash ~/2cfnat.sh
 ```
+
+
+
+配置自动进入。
+
+cd ~ chmod +x 2cfnat.sh
+
+打开执行这个
+
+然后再执行。
+nano ~/.bashrc
+
+然后再粘贴。
+
+bash ~/2cfnat.sh
+
+然后再。
+
+Ctrl + X
+
+输入 Y
+
+结束软件，重新进入。
