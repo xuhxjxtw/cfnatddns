@@ -51,3 +51,7 @@ https://wwss.lanzouq.com/imPKX30p3r3c
 ```
 curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/cfnat.sh -o ~/cfnat.sh && chmod +x ~/cfnat.sh && bash ~/cfnat.sh
 ```
+
+<video controls autoplay loop width="600">
+  <source src="https://raw.githubusercontent.com/onlyno999/cfnatddns/refs/heads/main/mmexport1752456938662.mp4" type="video/mp4">
+</video>
