@@ -63,7 +63,7 @@ cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
-cf_record_names = cf_conf.get("record_names", [])  # 支持多个域名
+cf_record_names = cf_conf.get("record_names", [])
 sync_count = config.get("sync_count", 1)
 
 # -------------------- IP 工具 --------------------
@@ -76,7 +76,6 @@ def get_ip_type(ip):
         return "A" if ip_obj.version == 4 else "AAAA"
     except ValueError:
         return None
-
 # -------------------- IP 缓存初始化与保存 --------------------
 ip_cache = {"A": [], "AAAA": []}
 log_data = []
@@ -113,7 +112,7 @@ def save_ip_log():
 load_ip_log()
 
 # -------------------- Cloudflare 同步函数 --------------------
-def update_cf_dns(ip):
+def update_cf_dns(ip, record_name):
     record_type = get_ip_type(ip)
     if not record_type:
         print(f"[跳过] 非法 IP 地址: {ip}")
@@ -135,52 +134,48 @@ def update_cf_dns(ip):
 
     try:
         # 删除与当前 IP 类型相反的记录
-        del_params = {"type": other_type}
-        for record_name in cf_record_names:
-            del_params["name"] = record_name
-            del_resp = requests.get(url, headers=headers, params=del_params)
-            if del_resp.json().get("success"):
-                for record in del_resp.json().get("result", []):
-                    record_id = record["id"]
-                    requests.delete(f"{url}/{record_id}", headers=headers)
-                    print(f"[清除] 删除旧 {other_type} 记录: {record['content']}")
+        del_params = {"type": other_type, "name": record_name}
+        del_resp = requests.get(url, headers=headers, params=del_params)
+        if del_resp.json().get("success"):
+            for record in del_resp.json().get("result", []):
+                record_id = record["id"]
+                requests.delete(f"{url}/{record_id}", headers=headers)
+                print(f"[清除] 删除旧 {other_type} 记录: {record['content']}")
     except Exception as e:
         print(f"[{other_type}] 删除异常: {e}")
 
     try:
         # 同步每个域名的 DNS 记录
-        for record_name in cf_record_names:
-            params = {"type": record_type, "name": record_name}
-            resp = requests.get(url, headers=headers, params=params)
-            existing = resp.json().get("result", []) if resp.json().get("success") else []
-            existing_ips = {r["content"]: r["id"] for r in existing}
-            desired_ips = ip_cache[record_type]
+        params = {"type": record_type, "name": record_name}
+        resp = requests.get(url, headers=headers, params=params)
+        existing = resp.json().get("result", []) if resp.json().get("success") else []
+        existing_ips = {r["content"]: r["id"] for r in existing}
+        desired_ips = ip_cache[record_type]
 
-            # 删除多余的记录
-            for ip_val, r_id in existing_ips.items():
-                if ip_val not in desired_ips:
-                    requests.delete(f"{url}/{r_id}", headers=headers)
-                    print(f"[同步] 删除多余 {record_type} IP: {ip_val}")
+        # 删除多余的记录
+        for ip_val, r_id in existing_ips.items():
+            if ip_val not in desired_ips:
+                requests.delete(f"{url}/{r_id}", headers=headers)
+                print(f"[同步] 删除多余 {record_type} IP: {ip_val} 在 {record_name}")
 
-            # 添加新的记录
-            for ip_val in desired_ips:
-                if ip_val in existing_ips:
-                    continue
-                data = {
-                    "type": record_type,
-                    "name": record_name,
-                    "content": ip_val,
-                    "ttl": 1,
-                    "proxied": False
-                }
-                resp = requests.post(url, headers=headers, json=data)
-                if resp.json().get("success"):
-                    print(f"[同步] 添加 {record_type} IP 成功: {ip_val} 到 {record_name}")
-                else:
-                    print(f"[同步] 添加 {record_type} IP 失败: {resp.json()}")
+        # 添加新的记录
+        for ip_val in desired_ips:
+            if ip_val in existing_ips:
+                continue
+            data = {
+                "type": record_type,
+                "name": record_name,
+                "content": ip_val,
+                "ttl": 1,
+                "proxied": False
+            }
+            resp = requests.post(url, headers=headers, json=data)
+            if resp.json().get("success"):
+                print(f"[同步] 添加 {record_type} IP 成功: {ip_val} 到 {record_name}")
+            else:
+                print(f"[同步] 添加 {record_type} IP 失败: {resp.json()}")
     except Exception as e:
         print(f"[{record_type}] 同步异常: {e}")
-
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
 optional_args = {
@@ -258,6 +253,6 @@ for line in proc.stdout:
                 log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]
                 save_ip_log()
                 print(f"[更新] 检测到新 {rtype} IP: {ip}")
-                # 为每个域名启动线程进行 DNS 更新
+                # 为每个域名启动独立线程同步
                 for record_name in cf_record_names:
-                    threading.Thread(target=update_cf_dns, args=(ip,), daemon=True).start()
+                    threading.Thread(target=update_cf_dns, args=(ip, record_name), daemon=True).start()
