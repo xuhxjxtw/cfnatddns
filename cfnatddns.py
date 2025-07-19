@@ -59,11 +59,21 @@ except Exception as e:
     print(f"[错误] 配置读取失败: {e}")
     exit(1)
 
+# Modified: Expect cloudflare to be a single dictionary, with record_names as a list
 cf_conf = config.get("cloudflare", {})
 cf_email = cf_conf.get("email")
 cf_api_key = cf_conf.get("api_key")
 cf_zone_id = cf_conf.get("zone_id")
-cf_record_names = cf_conf.get("record_names", [])
+cf_record_names = cf_conf.get("record_names", []) # Now expecting a list of names
+
+# Basic validation for Cloudflare config
+if not all([cf_email, cf_api_key, cf_zone_id, cf_record_names]):
+    print("[错误] Cloudflare 配置不完整 (email, api_key, zone_id, 或 record_names 缺失)。请检查 config.yaml。")
+    exit(1)
+if not isinstance(cf_record_names, list):
+    print("[错误] Cloudflare 'record_names' 应为列表。请检查 config.yaml。")
+    exit(1)
+
 sync_count = config.get("sync_count", 1)
 
 # -------------------- IP 工具 --------------------
@@ -76,6 +86,7 @@ def get_ip_type(ip):
         return "A" if ip_obj.version == 4 else "AAAA"
     except ValueError:
         return None
+
 # -------------------- IP 缓存初始化与保存 --------------------
 ip_cache = {"A": [], "AAAA": []}
 log_data = []
@@ -112,17 +123,28 @@ def save_ip_log():
 load_ip_log()
 
 # -------------------- Cloudflare 同步函数 --------------------
-def update_cf_dns(ip, record_name):
+# Modified: update_cf_dns now takes a single cf_record_name
+def update_cf_dns(ip, cf_email, cf_api_key, cf_zone_id, cf_record_name):
     record_type = get_ip_type(ip)
     if not record_type:
-        print(f"[跳过] 非法 IP 地址: {ip}")
+        print(f"[跳过] 非法 IP 地址: {ip} for {cf_record_name}")
         return
 
     other_type = "AAAA" if record_type == "A" else "A"
-    if ip_cache[other_type]:
-        print(f"[切换] IP 类型切换，清空旧 {other_type} 缓存")
-        ip_cache[other_type] = []
-        save_ip_log()
+    
+    # This logic assumes that for a given record, you primarily want A OR AAAA, not both.
+    # If the detected IP type is different from what's currently cached for the other type,
+    # it clears the other type's cache. This might be aggressive if you intend to keep both A and AAAA
+    # records active simultaneously and manage them independently for a single domain name.
+    # If you want to support both A and AAAA records on the same name at the same time,
+    # this clearing logic would need adjustment.
+    if ip_cache[other_type]: # This checks the *global* cache.
+        # A more refined check would be to see if the existing record for this specific name is of the other type
+        # For simplicity, keeping the global check which may cause more frequent type switching for all records.
+        # Consider if you truly need to clear the *other* IP type globally when *any* new IP is found.
+        # If not, this block could be removed or made more granular.
+        print(f"[{cf_record_name}] 检测到新 {record_type} IP，如果存在旧 {other_type} 记录，可能会被移除。")
+
 
     headers = {
         "X-Auth-Email": cf_email,
@@ -132,50 +154,53 @@ def update_cf_dns(ip, record_name):
 
     url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
 
+    # Step 1: Delete records of the *other* type if they exist for this specific record_name
     try:
-        # 删除与当前 IP 类型相反的记录
-        del_params = {"type": other_type, "name": record_name}
+        del_params = {"type": other_type, "name": cf_record_name}
         del_resp = requests.get(url, headers=headers, params=del_params)
         if del_resp.json().get("success"):
             for record in del_resp.json().get("result", []):
                 record_id = record["id"]
                 requests.delete(f"{url}/{record_id}", headers=headers)
-                print(f"[清除] 删除旧 {other_type} 记录: {record['content']}")
+                print(f"[{cf_record_name}] 清除旧 {other_type} 记录: {record['content']}")
+        elif not del_resp.json().get("success"):
+            print(f"[{cf_record_name}] 查询旧 {other_type} 记录失败或无权限: {del_resp.json()}")
     except Exception as e:
-        print(f"[{other_type}] 删除异常: {e}")
+        print(f"[{cf_record_name}] 删除 {other_type} 记录异常: {e}")
 
+    # Step 2: Synchronize records of the *current* type
     try:
-        # 同步每个域名的 DNS 记录
-        params = {"type": record_type, "name": record_name}
+        params = {"type": record_type, "name": cf_record_name}
         resp = requests.get(url, headers=headers, params=params)
         existing = resp.json().get("result", []) if resp.json().get("success") else []
         existing_ips = {r["content"]: r["id"] for r in existing}
-        desired_ips = ip_cache[record_type]
+        desired_ips = ip_cache[record_type] # Use the global IP cache for the current type
 
-        # 删除多余的记录
+        # Delete any existing records that are no longer in our desired list
         for ip_val, r_id in existing_ips.items():
             if ip_val not in desired_ips:
                 requests.delete(f"{url}/{r_id}", headers=headers)
-                print(f"[同步] 删除多余 {record_type} IP: {ip_val} 在 {record_name}")
+                print(f"[{cf_record_name}] 同步删除多余 {record_type} IP: {ip_val}")
 
-        # 添加新的记录
+        # Add any desired IPs that don't currently exist
         for ip_val in desired_ips:
             if ip_val in existing_ips:
-                continue
+                continue # Already exists
             data = {
                 "type": record_type,
-                "name": record_name,
+                "name": cf_record_name,
                 "content": ip_val,
-                "ttl": 1,
-                "proxied": False
+                "ttl": 1, # Automatic TTL
+                "proxied": False # Not proxied by default
             }
             resp = requests.post(url, headers=headers, json=data)
             if resp.json().get("success"):
-                print(f"[同步] 添加 {record_type} IP 成功: {ip_val} 到 {record_name}")
+                print(f"[{cf_record_name}] 添加 {record_type} IP 成功: {ip_val}")
             else:
-                print(f"[同步] 添加 {record_type} IP 失败: {resp.json()}")
+                print(f"[{cf_record_name}] 添加 {record_type} IP 失败: {resp.json()}")
     except Exception as e:
-        print(f"[{record_type}] 同步异常: {e}")
+        print(f"[{cf_record_name}] 同步 {record_type} 记录异常: {e}")
+
 # -------------------- 启动 cfnat 子进程 --------------------
 args = [exe_name]
 optional_args = {
@@ -190,7 +215,7 @@ optional_args = {
 }
 for key, flag in optional_args.items():
     value = config.get(key)
-    if value is not None:
+    if value is not None: # Use config directly, not cf_conf, for general cfnat args
         args.append(f"{flag}{value}")
 
 try:
@@ -242,6 +267,8 @@ for line in proc.stdout:
     if "最佳" in line or "best" in line.lower():
         ips = ipv4_pattern.findall(line) + ipv6_pattern.findall(line)
         for ip in ips:
+            # This specific filter might be excluding valid IPv6 IPs like ::1 or certain short forms.
+            # If you encounter issues with IPv6 updates, review this filter.
             if ":" in ip and ip.count(":") == 2 and ip.replace(":", "").isdigit():
                 continue
             rtype = get_ip_type(ip)
@@ -250,9 +277,12 @@ for line in proc.stdout:
                 ip_cache[rtype] = ip_cache[rtype][:sync_count]
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log_data.insert(0, (timestamp, ip))
+                # Only keep log data for IPs that are still in the cache
                 log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]
                 save_ip_log()
                 print(f"[更新] 检测到新 {rtype} IP: {ip}")
-                # 为每个域名启动独立线程同步
-                for record_name in cf_record_names:
-                    threading.Thread(target=update_cf_dns, args=(ip, record_name), daemon=True).start()
+                
+                # Modified: Iterate through all configured record_names for the single CF account/zone
+                for record_name_item in cf_record_names:
+                    # Start a thread to update DNS for each record_name
+                    threading.Thread(target=update_cf_dns, args=(ip, cf_email, cf_api_key, cf_zone_id, record_name_item,), daemon=True).start()
