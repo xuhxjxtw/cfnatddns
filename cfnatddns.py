@@ -106,11 +106,15 @@ def load_ip_log():
                     ip_cache[rtype].append(ip)
             except Exception:
                 continue
-    ip_cache["A"] = ip_cache["A"][:sync_count]
-    ip_cache["AAAA"] = ip_cache["AAAA"][:sync_count]
+
+    # 按照时间戳排序，并确保缓存的数量不超过 sync_count
+    ip_cache["A"] = sorted(ip_cache["A"], key=lambda x: x[0])[:sync_count]  # 按时间戳排序并限制数量
+    ip_cache["AAAA"] = sorted(ip_cache["AAAA"], key=lambda x: x[0])[:sync_count]  # 同上
+    log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]  # 只保留缓存中的 IP
 
 def save_ip_log():
     all_lines = []
+    # 仅保存缓存中存在的 IP
     for rtype in ["A", "AAAA"]:
         for ip in ip_cache[rtype]:
             for time_str, cached_ip in reversed(log_data):
@@ -123,7 +127,6 @@ def save_ip_log():
 load_ip_log()
 
 # -------------------- Cloudflare 同步函数 --------------------
-# Modified: update_cf_dns now takes a single cf_record_name
 def update_cf_dns(ip, cf_email, cf_api_key, cf_zone_id, cf_record_name):
     record_type = get_ip_type(ip)
     if not record_type:
@@ -132,36 +135,24 @@ def update_cf_dns(ip, cf_email, cf_api_key, cf_zone_id, cf_record_name):
 
     other_type = "AAAA" if record_type == "A" else "A"
     
-    # This logic assumes that for a given record, you primarily want A OR AAAA, not both.
-    # If the detected IP type is different from what's currently cached for the other type,
-    # it clears the other type's cache. This might be aggressive if you intend to keep both A and AAAA
-    # records active simultaneously and manage them independently for a single domain name.
-    # If you want to support both A and AAAA records on the same name at the same time,
-    # this clearing logic would need adjustment.
-    if ip_cache[other_type]: # This checks the *global* cache.
-        # A more refined check would be to see if the existing record for this specific name is of the other type
-        # For simplicity, keeping the global check which may cause more frequent type switching for all records.
-        # Consider if you truly need to clear the *other* IP type globally when *any* new IP is found.
-        # If not, this block could be removed or made more granular.
-        print(f"[{cf_record_name}] 检测到新 {record_type} IP，如果存在旧 {other_type} 记录，可能会被移除。")
-
-
-    headers = {
-        "X-Auth-Email": cf_email,
-        "X-Auth-Key": cf_api_key,
-        "Content-Type": "application/json"
-    }
-
-    url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
-
     # Step 1: Delete records of the *other* type if they exist for this specific record_name
     try:
         del_params = {"type": other_type, "name": cf_record_name}
-        del_resp = requests.get(url, headers=headers, params=del_params)
+        url = f"https://api.cloudflare.com/client/v4/zones/{cf_zone_id}/dns_records"
+        del_resp = requests.get(url, headers={
+            "X-Auth-Email": cf_email,
+            "X-Auth-Key": cf_api_key,
+            "Content-Type": "application/json"
+        }, params=del_params)
+        
         if del_resp.json().get("success"):
             for record in del_resp.json().get("result", []):
                 record_id = record["id"]
-                requests.delete(f"{url}/{record_id}", headers=headers)
+                requests.delete(f"{url}/{record_id}", headers={
+                    "X-Auth-Email": cf_email,
+                    "X-Auth-Key": cf_api_key,
+                    "Content-Type": "application/json"
+                })
                 print(f"[{cf_record_name}] 清除旧 {other_type} 记录: {record['content']}")
         elif not del_resp.json().get("success"):
             print(f"[{cf_record_name}] 查询旧 {other_type} 记录失败或无权限: {del_resp.json()}")
@@ -171,29 +162,42 @@ def update_cf_dns(ip, cf_email, cf_api_key, cf_zone_id, cf_record_name):
     # Step 2: Synchronize records of the *current* type
     try:
         params = {"type": record_type, "name": cf_record_name}
-        resp = requests.get(url, headers=headers, params=params)
+        resp = requests.get(url, headers={
+            "X-Auth-Email": cf_email,
+            "X-Auth-Key": cf_api_key,
+            "Content-Type": "application/json"
+        }, params=params)
+        
         existing = resp.json().get("result", []) if resp.json().get("success") else []
         existing_ips = {r["content"]: r["id"] for r in existing}
-        desired_ips = ip_cache[record_type] # Use the global IP cache for the current type
+        desired_ips = ip_cache[record_type]  # Use the global IP cache for the current type
 
         # Delete any existing records that are no longer in our desired list
         for ip_val, r_id in existing_ips.items():
             if ip_val not in desired_ips:
-                requests.delete(f"{url}/{r_id}", headers=headers)
+                requests.delete(f"{url}/{r_id}", headers={
+                    "X-Auth-Email": cf_email,
+                    "X-Auth-Key": cf_api_key,
+                    "Content-Type": "application/json"
+                })
                 print(f"[{cf_record_name}] 同步删除多余 {record_type} IP: {ip_val}")
 
         # Add any desired IPs that don't currently exist
         for ip_val in desired_ips:
             if ip_val in existing_ips:
-                continue # Already exists
+                continue  # Already exists
             data = {
                 "type": record_type,
                 "name": cf_record_name,
                 "content": ip_val,
-                "ttl": 1, # Automatic TTL
-                "proxied": False # Not proxied by default
+                "ttl": 1,  # Automatic TTL
+                "proxied": False  # Not proxied by default
             }
-            resp = requests.post(url, headers=headers, json=data)
+            resp = requests.post(url, headers={
+                "X-Auth-Email": cf_email,
+                "X-Auth-Key": cf_api_key,
+                "Content-Type": "application/json"
+            }, json=data)
             if resp.json().get("success"):
                 print(f"[{cf_record_name}] 添加 {record_type} IP 成功: {ip_val}")
             else:
@@ -215,7 +219,7 @@ optional_args = {
 }
 for key, flag in optional_args.items():
     value = config.get(key)
-    if value is not None: # Use config directly, not cf_conf, for general cfnat args
+    if value is not None:  # Use config directly, not cf_conf, for general cfnat args
         args.append(f"{flag}{value}")
 
 try:
@@ -244,8 +248,10 @@ def toggle_console():
 def on_show_hide(icon, item): toggle_console()
 def on_exit(icon, item):
     icon.stop()
-    try: proc.terminate()
-    except Exception: pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
     os._exit(0)
 
 def tray_icon():
@@ -274,10 +280,10 @@ for line in proc.stdout:
             rtype = get_ip_type(ip)
             if rtype and ip not in ip_cache[rtype]:
                 ip_cache[rtype].insert(0, ip)
-                ip_cache[rtype] = ip_cache[rtype][:sync_count]
+                ip_cache[rtype] = ip_cache[rtype][:sync_count]  # 确保缓存的 IP 数量不超过 sync_count
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 log_data.insert(0, (timestamp, ip))
-                # Only keep log data for IPs that are still in the cache
+                # 只保留缓存中的 IP
                 log_data[:] = [entry for entry in log_data if entry[1] in ip_cache["A"] + ip_cache["AAAA"]]
                 save_ip_log()
                 print(f"[更新] 检测到新 {rtype} IP: {ip}")
