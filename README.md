@@ -42,7 +42,9 @@ https://wwss.lanzouq.com/i31An30p3red
 
 https://wwss.lanzouq.com/imPKX30p3r3c
 
+增加一个支持多域名，多ip的，直接同步。
 
+https://wwss.lanzouq.com/iVxQy31cnieh
 
 
 
@@ -57,6 +59,7 @@ curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/cfnat.sh -o ~
 ```
 curl -sSL https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/2cfnat.sh -o ~/2cfnat.sh && chmod +x ~/2cfnat.sh && bash ~/2cfnat.sh
 ```
+
 
 
 
